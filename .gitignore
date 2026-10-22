@@ -1,0 +1,39 @@
+# Python / Django
+__pycache__/
+*.py[cod]
+*$py.class
+*.sqlite3
+db.sqlite3
+/backend/media/
+/backend/staticfiles/
+.env
+.env.local
+.venv/
+env/
+venv/
+ENV/
+
+# Node / Web / Mobile
+node_modules/
+dist/
+build/
+.expo/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.eslintcache
+
+# React Native / Android
+mobile/android/app/build/
+mobile/android/.gradle/
+mobile/android/local.properties
+*.keystore
+*.apk
+*.aab
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
