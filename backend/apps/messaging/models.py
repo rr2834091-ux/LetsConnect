@@ -48,6 +48,7 @@ class ConversationParticipant(models.Model):
     role = models.CharField(max_length=20, default="member")
     joined_at = models.DateTimeField(auto_now_add=True)
     last_read_at = models.DateTimeField(null=True, blank=True)
+    is_hidden = models.BooleanField(default=False)
 
     class Meta:
         managed = True

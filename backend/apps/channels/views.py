@@ -5,7 +5,7 @@ from .models import Channel, ChannelMembership
 from .serializers import ChannelSerializer, ChannelMembershipSerializer
 from apps.teams.models import Team, TeamMembership
 from apps.memberships.models import Employee, AdminProfile
-from apps.permissions.evaluator import can_create_channels, is_org_admin
+from apps.permissions.evaluator import can_create_channels, is_org_admin, is_team_owner
 from apps.messaging.models import Conversation
 
 class ChannelListCreateView(generics.ListCreateAPIView):
@@ -100,8 +100,16 @@ class ChannelDetailView(generics.RetrieveUpdateDestroyAPIView):
     def get_queryset(self):
         return Channel.objects.all()
 
+    def perform_update(self, serializer):
+        channel = serializer.instance
+        if not is_team_owner(self.request.user, channel.team_id) and not is_org_admin(self.request.user, channel.team.organization_id):
+            raise exceptions.PermissionDenied("Only a team owner or organization admin can edit this channel.")
+        serializer.save()
+
     def perform_destroy(self, instance):
         if instance.name.lower() == 'general':
-            raise exceptions.ValidationError("The default general channel cannot be deleted.")
+            raise exceptions.ValidationError({"detail": "The default general channel cannot be deleted."})
+        if not is_team_owner(self.request.user, instance.team_id) and not is_org_admin(self.request.user, instance.team.organization_id):
+            raise exceptions.PermissionDenied("Only a team owner or organization admin can delete this channel.")
         instance.is_archived = True
         instance.save()

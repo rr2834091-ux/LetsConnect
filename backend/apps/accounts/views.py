@@ -65,7 +65,7 @@ class LoginView(views.APIView):
             return Response({"detail": "Invalid email or password."}, status=status.HTTP_401_UNAUTHORIZED)
 
         if not user.is_active:
-            return Response({"detail": "This account is inactive."}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "This account has been deactivated. Please contact your organization administrator for reactivation."}, status=status.HTTP_403_FORBIDDEN)
 
         # Work context check
         orgs = get_user_organizations(user)
@@ -538,3 +538,45 @@ class SwitchContextView(views.APIView):
             "active_context": "work",
             "active_organization": OrganizationSerializer(target_org).data
         })
+
+
+class AccountDeactivationView(views.APIView):
+    """
+    Sign off and deactivate account.
+    Verifies user password, invalidates active sessions and tokens,
+    marks account inactive, and preserves conversation history.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        password = request.data.get('password')
+        if not password:
+            return Response(
+                {"detail": "Current password is required to deactivate your account."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        user = request.user
+        if not user.check_password(password):
+            return Response(
+                {"detail": "Incorrect password. Account could not be deactivated."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Deactivate user
+        user.is_active = False
+        user.save(update_fields=['is_active'])
+
+        # Update employee status to deactivated if employee record exists
+        Employee.objects.filter(email__iexact=user.email).update(status='deactivated')
+
+        # Update presence status to offline
+        from apps.presence.models import Presence
+        Presence.objects.filter(user=user).update(status='offline', is_manual=True)
+
+        # Invalidate authentication tokens
+        Token.objects.filter(user=user).delete()
+
+        return Response({
+            "detail": "Thank you for being part of Let's Connect. We wish you a great career ahead."
+        }, status=status.HTTP_200_OK)

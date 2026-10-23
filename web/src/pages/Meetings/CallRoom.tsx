@@ -16,7 +16,6 @@ import {
   AlertCircle,
   RefreshCw,
   ChevronLeft,
-  Settings,
   ShieldCheck,
   UserPlus,
   Smile,
@@ -24,7 +23,12 @@ import {
   Download,
   X,
   FileText,
-  Upload
+  Upload,
+  Volume2,
+  Pin,
+  Maximize2,
+  Minimize2,
+  Expand,
 } from 'lucide-react';
 
 type CallStage = 'prejoin' | 'connecting' | 'in_call' | 'error' | 'disconnected';
@@ -44,11 +48,54 @@ interface ReactionItem {
   sender: string;
 }
 
+// Subcomponent to render any LiveKit Video Track automatically filling its container with full device screen resolution
+const VideoTrackView: React.FC<{
+  track?: Track | null;
+  fit?: 'cover' | 'contain';
+  mirrored?: boolean;
+  style?: React.CSSProperties;
+}> = ({ track, fit = 'cover', mirrored = false, style }) => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el || !track) return;
+    track.attach(el);
+    return () => {
+      try {
+        track.detach(el);
+      } catch (_) {}
+    };
+  }, [track]);
+
+  if (!track) return null;
+
+  return (
+    <video
+      ref={videoRef}
+      autoPlay
+      playsInline
+      muted={mirrored}
+      style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        width: '100%',
+        height: '100%',
+        objectFit: fit,
+        transform: mirrored ? 'scaleX(-1)' : 'none',
+        display: 'block',
+        ...style,
+      }}
+    />
+  );
+};
+
 export const CallRoom: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { user, activeOrganization } = useAuth();
+  const { user } = useAuth();
 
   // Session parameters from router state or sessionStorage
   const navState = (location.state || {}) as {
@@ -85,6 +132,16 @@ export const CallRoom: React.FC = () => {
   const [callDuration, setCallDuration] = useState<number>(0);
   const [copied, setCopied] = useState<boolean>(false);
 
+  // Full-screen and Screen Resolution Adapter states
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
+  const [videoFitMode, setVideoFitMode] = useState<'cover' | 'contain'>('cover');
+  const [swappedPiP, setSwappedPiP] = useState<boolean>(false);
+
+  // Immersive layout states: Active Speaker & Focused Participant
+  const [activeSpeakerId, setActiveSpeakerId] = useState<string | null>(null);
+  const [focusedParticipantId, setFocusedParticipantId] = useState<string | null>(null);
+  const [, setMediaUpdateTick] = useState<number>(0);
+
   // In-Call Features State
   const [isAddPeopleOpen, setIsAddPeopleOpen] = useState(false);
   const [directoryUsers, setDirectoryUsers] = useState<any[]>([]);
@@ -102,14 +159,36 @@ export const CallRoom: React.FC = () => {
   // Refs for Room and Media
   const roomRef = useRef<Room | null>(null);
   const isConnectingRef = useRef<boolean>(false);
-  const isLeavingRef = useRef<boolean>(false);
   const prejoinStreamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // DOM Refs
+  // DOM Ref for prejoin preview
   const prejoinVideoRef = useRef<HTMLVideoElement>(null);
-  const localVideoRef = useRef<HTMLVideoElement>(null);
-  const remoteVideosRef = useRef<HTMLDivElement>(null);
+
+  // Listen to browser fullscreen change events
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    };
+  }, []);
+
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch((err) => {
+        console.warn('Error entering fullscreen:', err);
+      });
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen().catch((err) => {
+          console.warn('Error exiting fullscreen:', err);
+        });
+      }
+    }
+  };
 
   // Fallback: If token was not passed in state, try reading from sessionStorage
   useEffect(() => {
@@ -149,7 +228,7 @@ export const CallRoom: React.FC = () => {
     }
   }, [meetingId, meetingToken, livekitUrl, roomName, meetingTitle, displayName, isHost]);
 
-  // Pre-join camera & microphone preview with device enumeration check
+  // Pre-join camera & microphone preview with dynamic device resolution check
   useEffect(() => {
     let active = true;
 
@@ -158,12 +237,10 @@ export const CallRoom: React.FC = () => {
 
       try {
         let hasVideoDevice = false;
-        let hasAudioDevice = false;
 
         if (navigator.mediaDevices?.enumerateDevices) {
           const devices = await navigator.mediaDevices.enumerateDevices();
           hasVideoDevice = devices.some((d) => d.kind === 'videoinput');
-          hasAudioDevice = devices.some((d) => d.kind === 'audioinput');
         }
 
         if (!hasVideoDevice) {
@@ -171,9 +248,14 @@ export const CallRoom: React.FC = () => {
           setHardwareNotice('No webcam detected. Video disabled; joining in audio-only mode.');
         }
 
+        // Request high-resolution capture matching device capability
         const constraints: MediaStreamConstraints = {
           audio: true,
-          video: (hasVideoDevice && isVideoEnabled) ? true : false,
+          video: (hasVideoDevice && isVideoEnabled) ? {
+            width: { ideal: 1920, min: 1280 },
+            height: { ideal: 1080, min: 720 },
+            facingMode: 'user',
+          } : false,
         };
 
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -188,7 +270,6 @@ export const CallRoom: React.FC = () => {
         }
       } catch (err: any) {
         console.warn('Pre-join camera/mic unavailable:', err.message);
-        // Fallback: try audio-only
         try {
           setIsVideoEnabled(false);
           const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
@@ -213,9 +294,8 @@ export const CallRoom: React.FC = () => {
         prejoinStreamRef.current = null;
       }
     };
-  }, [stage]);
+  }, [stage, isVideoEnabled]);
 
-  // Toggle pre-join media preview states
   const togglePrejoinVideo = () => {
     const nextState = !isVideoEnabled;
     setIsVideoEnabled(nextState);
@@ -251,59 +331,6 @@ export const CallRoom: React.FC = () => {
     };
   }, [stage]);
 
-  // Helper to attach remote track
-  const attachRemoteTrack = (track: Track, participant: RemoteParticipant) => {
-    if (!remoteVideosRef.current) return;
-    if (track.kind === Track.Kind.Video) {
-      const existing = document.getElementById(`track-${participant.identity}`);
-      if (existing) existing.remove();
-
-      const el = track.attach();
-      el.id = `track-${participant.identity}`;
-      el.style.width = '100%';
-      el.style.height = '100%';
-      el.style.objectFit = 'cover';
-      el.style.borderRadius = '8px';
-
-      const wrapper = document.createElement('div');
-      wrapper.id = `wrapper-${participant.identity}`;
-      wrapper.style.width = '480px';
-      wrapper.style.height = '340px';
-      wrapper.style.backgroundColor = '#262626';
-      wrapper.style.borderRadius = '10px';
-      wrapper.style.position = 'relative';
-      wrapper.style.overflow = 'hidden';
-      wrapper.style.border = '1px solid #383838';
-
-      const label = document.createElement('div');
-      label.style.position = 'absolute';
-      label.style.bottom = '12px';
-      label.style.left = '12px';
-      label.style.backgroundColor = 'rgba(0,0,0,0.6)';
-      label.style.padding = '4px 10px';
-      label.style.borderRadius = '4px';
-      label.style.fontSize = '12px';
-      label.style.color = '#ffffff';
-      label.innerText = participant.name || participant.identity;
-
-      wrapper.appendChild(el);
-      wrapper.appendChild(label);
-      remoteVideosRef.current.appendChild(wrapper);
-    } else if (track.kind === Track.Kind.Audio) {
-      const audioEl = track.attach();
-      audioEl.id = `audio-${participant.identity}`;
-      document.body.appendChild(audioEl);
-    }
-  };
-
-  const detachRemoteTrack = (track: Track, participant: RemoteParticipant) => {
-    track.detach().forEach((el) => el.remove());
-    const wrapper = document.getElementById(`wrapper-${participant.identity}`);
-    if (wrapper) wrapper.remove();
-    const audioEl = document.getElementById(`audio-${participant.identity}`);
-    if (audioEl) audioEl.remove();
-  };
-
   // Main LiveKit Connect lifecycle
   const connectToLiveKit = async () => {
     if (isConnectingRef.current || roomRef.current) return;
@@ -319,7 +346,6 @@ export const CallRoom: React.FC = () => {
     }
 
     isConnectingRef.current = true;
-    isLeavingRef.current = false;
     setStage('connecting');
     setErrorMessage(null);
 
@@ -330,7 +356,7 @@ export const CallRoom: React.FC = () => {
         adaptiveStream: true,
         dynacast: true,
         videoCaptureDefaults: {
-          resolution: VideoPresets.h720.resolution,
+          resolution: VideoPresets.h1080.resolution,
         },
       });
 
@@ -341,28 +367,71 @@ export const CallRoom: React.FC = () => {
         if (roomInstance) {
           setParticipantsCount(roomInstance.remoteParticipants.size + 1);
         }
+        setMediaUpdateTick((t) => t + 1);
       });
 
       roomInstance.on(RoomEvent.ParticipantConnected, () => {
         if (roomInstance) {
           setParticipantsCount(roomInstance.remoteParticipants.size + 1);
         }
+        setMediaUpdateTick((t) => t + 1);
       });
 
       roomInstance.on(RoomEvent.ParticipantDisconnected, (participant) => {
         if (roomInstance) {
           setParticipantsCount(roomInstance.remoteParticipants.size + 1);
         }
-        const wrapper = document.getElementById(`wrapper-${participant.identity}`);
-        if (wrapper) wrapper.remove();
+        setFocusedParticipantId((prev) => (prev === participant.identity ? null : prev));
+        const audioEl = document.getElementById(`audio-${participant.identity}`);
+        if (audioEl) audioEl.remove();
+        setMediaUpdateTick((t) => t + 1);
       });
 
-      roomInstance.on(RoomEvent.TrackSubscribed, (track: Track, pub: RemoteTrackPublication, participant: RemoteParticipant) => {
-        attachRemoteTrack(track, participant);
+      roomInstance.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+        if (speakers && speakers.length > 0) {
+          setActiveSpeakerId(speakers[0].identity);
+        } else {
+          setActiveSpeakerId(null);
+        }
+        setMediaUpdateTick((t) => t + 1);
       });
 
-      roomInstance.on(RoomEvent.TrackUnsubscribed, (track: Track, pub: RemoteTrackPublication, participant: RemoteParticipant) => {
-        detachRemoteTrack(track, participant);
+      roomInstance.on(RoomEvent.TrackSubscribed, (track: Track, _pub: RemoteTrackPublication, participant: RemoteParticipant) => {
+        if (track.kind === Track.Kind.Audio) {
+          const existing = document.getElementById(`audio-${participant.identity}`);
+          if (existing) existing.remove();
+          const audioEl = track.attach();
+          audioEl.id = `audio-${participant.identity}`;
+          document.body.appendChild(audioEl);
+        }
+        setMediaUpdateTick((t) => t + 1);
+      });
+
+      roomInstance.on(RoomEvent.TrackUnsubscribed, (track: Track, _pub: RemoteTrackPublication, participant: RemoteParticipant) => {
+        if (track.kind === Track.Kind.Audio) {
+          try {
+            track.detach().forEach((el) => el.remove());
+          } catch (_) {}
+          const audioEl = document.getElementById(`audio-${participant.identity}`);
+          if (audioEl) audioEl.remove();
+        }
+        setMediaUpdateTick((t) => t + 1);
+      });
+
+      roomInstance.on(RoomEvent.TrackMuted, () => {
+        setMediaUpdateTick((t) => t + 1);
+      });
+
+      roomInstance.on(RoomEvent.TrackUnmuted, () => {
+        setMediaUpdateTick((t) => t + 1);
+      });
+
+      roomInstance.on(RoomEvent.LocalTrackPublished, () => {
+        setMediaUpdateTick((t) => t + 1);
+      });
+
+      roomInstance.on(RoomEvent.LocalTrackUnpublished, () => {
+        setMediaUpdateTick((t) => t + 1);
       });
 
       // Handle real-time data packets (Reactions, Meeting Ended, Shared Files)
@@ -389,26 +458,29 @@ export const CallRoom: React.FC = () => {
       });
 
       roomInstance.on(RoomEvent.Disconnected, () => {
-        if (isLeavingRef.current) {
-          sessionStorage.removeItem('active_call_session');
-          navigate('/meetings');
-        } else {
-          setStage('disconnected');
-        }
+        sessionStorage.removeItem('active_call_session');
+        navigate('/calls');
       });
 
       // Connect to LiveKit Cloud Server
       await roomInstance.connect(livekitUrl, meetingToken);
       roomRef.current = roomInstance;
 
-      // Publish local media
+      // Attach existing audio tracks from participants already in room
+      roomInstance.remoteParticipants.forEach((participant) => {
+        participant.trackPublications.forEach((pub) => {
+          if (pub.track && pub.track.kind === Track.Kind.Audio) {
+            const audioEl = pub.track.attach();
+            audioEl.id = `audio-${participant.identity}`;
+            document.body.appendChild(audioEl);
+          }
+        });
+      });
+
+      // Publish local media with high-resolution presets
       try {
         if (isVideoEnabled) {
           await roomInstance.localParticipant.setCameraEnabled(true);
-          const camPub = roomInstance.localParticipant.getTrackPublication(Track.Source.Camera);
-          if (camPub?.track && localVideoRef.current) {
-            camPub.track.attach(localVideoRef.current);
-          }
         } else {
           await roomInstance.localParticipant.setCameraEnabled(false);
         }
@@ -421,6 +493,7 @@ export const CallRoom: React.FC = () => {
       } catch (mediaErr: any) {
         console.warn('Initial media device publishing error:', mediaErr);
       }
+      setMediaUpdateTick((t) => t + 1);
     } catch (err: any) {
       console.error('Failed to connect to LiveKit room:', err);
       if (roomInstance) {
@@ -438,7 +511,6 @@ export const CallRoom: React.FC = () => {
 
   // Safe teardown when leaving call
   const leaveMeeting = useCallback(() => {
-    isLeavingRef.current = true;
     if (roomRef.current) {
       try {
         roomRef.current.disconnect();
@@ -447,8 +519,9 @@ export const CallRoom: React.FC = () => {
       }
       roomRef.current = null;
     }
+    document.querySelectorAll('[id^="audio-"]').forEach((el) => el.remove());
     sessionStorage.removeItem('active_call_session');
-    navigate('/meetings');
+    navigate('/calls');
   }, [navigate]);
 
   const endMeetingForAll = async () => {
@@ -482,7 +555,9 @@ export const CallRoom: React.FC = () => {
         prejoinStreamRef.current = null;
       }
       if (roomRef.current) {
-        roomRef.current.disconnect();
+        try {
+          roomRef.current.disconnect();
+        } catch (_) {}
         roomRef.current = null;
       }
     };
@@ -495,6 +570,7 @@ export const CallRoom: React.FC = () => {
     try {
       await roomRef.current.localParticipant.setMicrophoneEnabled(newState);
       setIsAudioEnabled(newState);
+      setMediaUpdateTick((t) => t + 1);
     } catch (err) {
       console.error('Failed to toggle mic', err);
     }
@@ -506,12 +582,7 @@ export const CallRoom: React.FC = () => {
     try {
       await roomRef.current.localParticipant.setCameraEnabled(newState);
       setIsVideoEnabled(newState);
-      if (newState && localVideoRef.current) {
-        const camPub = roomRef.current.localParticipant.getTrackPublication(Track.Source.Camera);
-        if (camPub?.track) {
-          camPub.track.attach(localVideoRef.current);
-        }
-      }
+      setMediaUpdateTick((t) => t + 1);
     } catch (err) {
       console.error('Failed to toggle camera', err);
     }
@@ -523,6 +594,7 @@ export const CallRoom: React.FC = () => {
     try {
       await roomRef.current.localParticipant.setScreenShareEnabled(newState);
       setIsScreenSharing(newState);
+      setMediaUpdateTick((t) => t + 1);
     } catch (err) {
       console.warn('Screen share canceled or failed', err);
       setIsScreenSharing(false);
@@ -732,6 +804,8 @@ export const CallRoom: React.FC = () => {
                 muted
                 playsInline
                 style={{
+                  position: 'absolute',
+                  inset: 0,
                   width: '100%',
                   height: '100%',
                   objectFit: 'cover',
@@ -769,6 +843,7 @@ export const CallRoom: React.FC = () => {
                 padding: '6px 14px',
                 borderRadius: '24px',
                 backdropFilter: 'blur(4px)',
+                zIndex: 10,
               }}>
                 <button
                   onClick={togglePrejoinAudio}
@@ -908,29 +983,123 @@ export const CallRoom: React.FC = () => {
             Adjust Settings
           </button>
           <button
-            onClick={() => navigate('/meetings')}
+            onClick={() => navigate('/calls')}
             className="teams-btn teams-btn-primary"
             style={{ padding: '8px 18px', fontSize: '13px' }}
           >
-            Return to Calendar
+            Return to Calls
           </button>
         </div>
       </div>
     );
   }
 
-  // ================= RENDER: 4. IN-CALL MEETING ROOM =================
+  // ================= RENDER: 4. IN-CALL MEETING ROOM (TRUE FULL SCREEN & RESOLUTION AUTO-ADAPT) =================
   const filteredColleagues = directoryUsers.filter((u) =>
     (u.full_name || '').toLowerCase().includes(addPeopleQuery.toLowerCase()) ||
     (u.email || '').toLowerCase().includes(addPeopleQuery.toLowerCase()) ||
     (u.job_title || '').toLowerCase().includes(addPeopleQuery.toLowerCase())
   );
 
+  // Compute active screen share (local or remote)
+  let activeScreenShare: { track: Track; name: string; isLocal: boolean } | null = null;
+  if (roomRef.current) {
+    const localScreenPub = roomRef.current.localParticipant.getTrackPublication(Track.Source.ScreenShare);
+    if (localScreenPub?.track && !localScreenPub.isMuted) {
+      activeScreenShare = {
+        track: localScreenPub.track,
+        name: displayName || 'You',
+        isLocal: true,
+      };
+    } else {
+      for (const [, p] of roomRef.current.remoteParticipants) {
+        const screenPub = p.getTrackPublication(Track.Source.ScreenShare);
+        if (screenPub?.track && !screenPub.isMuted) {
+          activeScreenShare = {
+            track: screenPub.track,
+            name: p.name || p.identity,
+            isLocal: false,
+          };
+          break;
+        }
+      }
+    }
+  }
+
+  // Build the complete participants list
+  interface ParticipantItem {
+    id: string;
+    name: string;
+    isLocal: boolean;
+    cameraTrack: Track | null;
+    isVideoMuted: boolean;
+    isAudioMuted: boolean;
+    isSpeaking: boolean;
+  }
+
+  const participantsList: ParticipantItem[] = [];
+
+  // Local user participant item
+  const localCamPub = roomRef.current?.localParticipant.getTrackPublication(Track.Source.Camera);
+  participantsList.push({
+    id: 'local',
+    name: `${displayName || 'You'} (You)`,
+    isLocal: true,
+    cameraTrack: (isVideoEnabled && localCamPub?.track) ? localCamPub.track : null,
+    isVideoMuted: !isVideoEnabled || !localCamPub?.track,
+    isAudioMuted: !isAudioEnabled,
+    isSpeaking: activeSpeakerId === roomRef.current?.localParticipant.identity,
+  });
+
+  // Remote participants
+  if (roomRef.current) {
+    roomRef.current.remoteParticipants.forEach((p) => {
+      const camPub = p.getTrackPublication(Track.Source.Camera);
+      const micPub = p.getTrackPublication(Track.Source.Microphone);
+      participantsList.push({
+        id: p.identity,
+        name: p.name || p.identity,
+        isLocal: false,
+        cameraTrack: (camPub?.track && !camPub.isMuted) ? camPub.track : null,
+        isVideoMuted: !camPub || camPub.isMuted || !camPub.track,
+        isAudioMuted: !micPub || micPub.isMuted,
+        isSpeaking: p.isSpeaking || activeSpeakerId === p.identity,
+      });
+    });
+  }
+
+  const isSolo = participantsList.length === 1;
+  const isOneOnOne = participantsList.length === 2 && !activeScreenShare;
+  const isMultiParty = participantsList.length >= 3 || !!activeScreenShare;
+
+  // Primary participant for the full-screen stage
+  let primaryParticipant: ParticipantItem = participantsList[0];
+  let secondaryParticipant: ParticipantItem | null = null;
+
+  if (isOneOnOne) {
+    // In 1-on-1, remote user is full-screen, local user is in floating PiP
+    if (swappedPiP) {
+      primaryParticipant = participantsList[0]; // Local
+      secondaryParticipant = participantsList[1]; // Remote
+    } else {
+      primaryParticipant = participantsList[1]; // Remote
+      secondaryParticipant = participantsList[0]; // Local
+    }
+  } else if (focusedParticipantId) {
+    const found = participantsList.find((p) => p.id === focusedParticipantId);
+    if (found) primaryParticipant = found;
+  } else if (activeSpeakerId) {
+    const speaker = participantsList.find((p) => p.id === activeSpeakerId || (p.isLocal && activeSpeakerId === roomRef.current?.localParticipant.identity));
+    if (speaker) primaryParticipant = speaker;
+  } else if (participantsList.length > 1) {
+    primaryParticipant = participantsList[1];
+  }
+
   return (
     <div style={{
       width: '100vw',
       height: '100vh',
-      backgroundColor: '#141414',
+      backgroundColor: '#0a0a0a',
       color: '#ffffff',
       display: 'flex',
       flexDirection: 'column',
@@ -941,7 +1110,7 @@ export const CallRoom: React.FC = () => {
       {activeReactions.length > 0 && (
         <div style={{
           position: 'absolute',
-          top: '76px',
+          top: '68px',
           right: '24px',
           zIndex: 50,
           display: 'flex',
@@ -953,21 +1122,21 @@ export const CallRoom: React.FC = () => {
             <div
               key={r.id}
               style={{
-                backgroundColor: 'rgba(0,0,0,0.75)',
+                backgroundColor: 'rgba(0,0,0,0.85)',
                 color: '#ffffff',
-                padding: '6px 14px',
-                borderRadius: '20px',
+                padding: '8px 16px',
+                borderRadius: '24px',
                 fontSize: '18px',
                 display: 'flex',
                 alignItems: 'center',
                 gap: '8px',
-                backdropFilter: 'blur(4px)',
-                boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-                animation: 'fadein 0.2s ease-out',
+                backdropFilter: 'blur(8px)',
+                boxShadow: '0 4px 16px rgba(0,0,0,0.5)',
+                border: '1px solid rgba(255,255,255,0.15)',
               }}
             >
-              <span style={{ fontSize: '24px' }}>{r.emoji}</span>
-              <span style={{ fontSize: '12px', color: '#adadad' }}>{r.sender}</span>
+              <span style={{ fontSize: '26px' }}>{r.emoji}</span>
+              <span style={{ fontSize: '13px', color: '#cccccc', fontWeight: 500 }}>{r.sender}</span>
             </div>
           ))}
         </div>
@@ -977,188 +1146,508 @@ export const CallRoom: React.FC = () => {
       {fileToast && (
         <div style={{
           position: 'absolute',
-          top: '76px',
+          top: '68px',
           left: '50%',
           transform: 'translateX(-50%)',
           zIndex: 50,
           backgroundColor: 'var(--brand-primary)',
           color: '#ffffff',
-          padding: '8px 18px',
-          borderRadius: '20px',
+          padding: '8px 20px',
+          borderRadius: '24px',
           fontSize: '13px',
-          fontWeight: 500,
-          boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+          fontWeight: 600,
+          boxShadow: '0 4px 20px rgba(0,0,0,0.6)',
         }}>
           {fileToast}
         </div>
       )}
 
-      {/* Top Meeting Header Bar */}
+      {/* ================= 1. FLOATING FULL-WIDTH TOP HEADER ================= */}
       <div style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
         height: '56px',
         padding: '0 20px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        backgroundColor: '#1f1f1f',
-        borderBottom: '1px solid #333333',
-        zIndex: 10,
+        background: 'linear-gradient(180deg, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 65%, rgba(0,0,0,0) 100%)',
+        zIndex: 30,
+        pointerEvents: 'auto',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <h2 style={{ fontSize: '16px', fontWeight: 600, margin: 0 }}>{meetingTitle}</h2>
-          <span style={{ fontSize: '12px', color: '#8a8a8a' }}>Room: {roomName}</span>
+        {/* Left info */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+          <h2 style={{ fontSize: '15px', fontWeight: 600, margin: 0, textShadow: '0 1px 3px rgba(0,0,0,0.8)' }}>
+            {meetingTitle}
+          </h2>
+          <span style={{ fontSize: '12px', color: 'rgba(255,255,255,0.7)', textShadow: '0 1px 2px rgba(0,0,0,0.8)' }}>
+            Room: {roomName}
+          </span>
           <button
             onClick={copyMeetingId}
             style={{
-              background: 'transparent',
-              border: 'none',
-              color: 'var(--brand-light)',
+              background: 'rgba(255,255,255,0.12)',
+              border: '1px solid rgba(255,255,255,0.2)',
+              borderRadius: '16px',
+              color: '#ffffff',
               cursor: 'pointer',
               display: 'flex',
               alignItems: 'center',
-              gap: '4px',
+              gap: '6px',
               fontSize: '12px',
+              padding: '4px 10px',
+              backdropFilter: 'blur(4px)',
             }}
           >
-            {copied ? <Check size={14} color="#237b4b" /> : <Copy size={14} />}
-            <span>{copied ? 'Copied' : 'Copy Room ID'}</span>
+            {copied ? <Check size={14} color="#237b4b" /> : <Copy size={13} />}
+            <span>{copied ? 'Copied' : 'Copy ID'}</span>
           </button>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+        {/* Right Controls: Duration, Participants, Resolution Fit, Fullscreen */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           {/* Duration Badge */}
-          <div style={{ fontSize: '13px', color: '#adadad', fontWeight: 500 }}>
+          <div style={{
+            fontSize: '12px',
+            color: '#ffffff',
+            fontWeight: 500,
+            background: 'rgba(0,0,0,0.4)',
+            padding: '4px 10px',
+            borderRadius: '12px',
+          }}>
             {formatDuration(callDuration)}
           </div>
 
           {/* Participant count */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', color: '#adadad' }}>
-            <Users size={16} />
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            fontSize: '12px',
+            color: '#ffffff',
+            background: 'rgba(0,0,0,0.4)',
+            padding: '4px 10px',
+            borderRadius: '12px',
+          }}>
+            <Users size={14} />
             <span>{participantsCount} in call</span>
           </div>
 
           {/* Live indicator */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#237b4b' }}>
-            <div style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: '#237b4b' }} />
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            fontSize: '12px',
+            color: '#4ade80',
+            background: 'rgba(35, 123, 75, 0.25)',
+            border: '1px solid rgba(35, 123, 75, 0.5)',
+            padding: '4px 10px',
+            borderRadius: '12px',
+          }}>
+            <div style={{ width: '7px', height: '7px', borderRadius: '50%', backgroundColor: '#22c55e', boxShadow: '0 0 6px #22c55e' }} />
             <span>Live</span>
           </div>
+
+          {/* Auto Screen Resolution Aspect Ratio Toggle (Cover vs Contain) */}
+          <button
+            onClick={() => setVideoFitMode((prev) => (prev === 'cover' ? 'contain' : 'cover'))}
+            className="teams-btn"
+            style={{
+              height: '32px',
+              fontSize: '12px',
+              padding: '0 10px',
+              borderRadius: '16px',
+              backgroundColor: 'rgba(255,255,255,0.15)',
+              color: '#ffffff',
+              border: '1px solid rgba(255,255,255,0.25)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              backdropFilter: 'blur(4px)',
+            }}
+            title={videoFitMode === 'cover' ? 'Currently Filling Screen (Click to Fit Frame)' : 'Currently Fitting Frame (Click to Fill Screen)'}
+          >
+            <Expand size={14} />
+            <span>{videoFitMode === 'cover' ? 'Fill Screen' : 'Fit Frame'}</span>
+          </button>
+
+          {/* Device Fullscreen Toggle */}
+          <button
+            onClick={toggleFullscreen}
+            className="teams-btn"
+            style={{
+              height: '32px',
+              fontSize: '12px',
+              padding: '0 10px',
+              borderRadius: '16px',
+              backgroundColor: isFullscreen ? 'var(--brand-primary)' : 'rgba(255,255,255,0.15)',
+              color: '#ffffff',
+              border: '1px solid rgba(255,255,255,0.25)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              backdropFilter: 'blur(4px)',
+            }}
+            title={isFullscreen ? 'Exit Full Screen' : 'Enter Full Screen'}
+          >
+            {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            <span>{isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}</span>
+          </button>
         </div>
       </div>
 
-      {/* Main Video Gallery Stage */}
+      {/* ================= 2. TRUE FULL SCREEN VIDEO STAGE (EDGE-TO-EDGE) ================= */}
       <div style={{
-        flex: 1,
+        position: 'absolute',
+        inset: 0,
+        width: '100%',
+        height: '100%',
+        overflow: 'hidden',
+        backgroundColor: '#000000',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        padding: '24px',
-        gap: '16px',
-        overflow: 'hidden',
-        position: 'relative',
       }}>
-        {/* Local Video Tile */}
-        <div style={{
-          width: '480px',
-          height: '340px',
-          backgroundColor: '#262626',
-          borderRadius: '10px',
-          position: 'relative',
-          overflow: 'hidden',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          border: '1px solid #383838',
-        }}>
-          <video
-            ref={localVideoRef}
-            autoPlay
-            muted
-            playsInline
-            style={{
-              width: '100%',
-              height: '100%',
-              objectFit: 'cover',
-              display: isVideoEnabled ? 'block' : 'none',
-              transform: 'scaleX(-1)',
-            }}
-          />
-
-          {!isVideoEnabled && (
+        {activeScreenShare ? (
+          // Screen share fills the screen with contain mode
+          <div style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
+            <VideoTrackView
+              track={activeScreenShare.track}
+              fit="contain"
+              mirrored={false}
+            />
             <div style={{
-              width: '76px',
-              height: '76px',
+              position: 'absolute',
+              top: '68px',
+              left: '20px',
+              backgroundColor: 'rgba(0,0,0,0.8)',
+              padding: '6px 14px',
+              borderRadius: '8px',
+              fontSize: '13px',
+              fontWeight: 600,
+              color: '#ffffff',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              backdropFilter: 'blur(6px)',
+              border: '1px solid rgba(255,255,255,0.15)',
+            }}>
+              <Monitor size={16} color="var(--brand-primary)" />
+              <span>Screen Share: {activeScreenShare.name}</span>
+            </div>
+          </div>
+        ) : primaryParticipant?.cameraTrack && !primaryParticipant.isVideoMuted ? (
+          // Camera track filling 100% of device screen resolution
+          <div style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }}>
+            <VideoTrackView
+              track={primaryParticipant.cameraTrack}
+              fit={videoFitMode}
+              mirrored={primaryParticipant.isLocal}
+            />
+          </div>
+        ) : (
+          // Camera-off state with centered avatar
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px' }}>
+            <div style={{
+              width: '120px',
+              height: '120px',
               borderRadius: '50%',
               backgroundColor: 'var(--brand-primary)',
               color: '#ffffff',
-              fontSize: '28px',
+              fontSize: '44px',
+              fontWeight: 700,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              boxShadow: '0 12px 32px rgba(0,0,0,0.6)',
+            }}>
+              {(primaryParticipant?.name || 'P').slice(0, 2).toUpperCase()}
+            </div>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: '20px', fontWeight: 600 }}>{primaryParticipant?.name}</div>
+              <div style={{ fontSize: '13px', color: '#8a8a8a', marginTop: '4px' }}>Camera is turned off</div>
+            </div>
+          </div>
+        )}
+
+        {/* Solo Call Notice Overlay */}
+        {isSolo && (
+          <div style={{
+            position: 'absolute',
+            top: '72px',
+            backgroundColor: 'rgba(0,0,0,0.65)',
+            padding: '8px 18px',
+            borderRadius: '20px',
+            fontSize: '13px',
+            color: '#e0e0e0',
+            backdropFilter: 'blur(6px)',
+            border: '1px solid rgba(255,255,255,0.12)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+          }}>
+            <Users size={15} color="var(--brand-primary)" />
+            <span>You are alone in this meeting. Invite colleagues or share Room ID: <strong>{roomName}</strong></span>
+          </div>
+        )}
+
+        {/* Focus Pin Badge */}
+        {focusedParticipantId && (
+          <div
+            onClick={() => setFocusedParticipantId(null)}
+            style={{
+              position: 'absolute',
+              top: '68px',
+              right: '20px',
+              backgroundColor: 'rgba(0,0,0,0.75)',
+              padding: '6px 14px',
+              borderRadius: '8px',
+              fontSize: '12px',
+              color: '#ffffff',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              cursor: 'pointer',
+              backdropFilter: 'blur(4px)',
+              border: '1px solid rgba(255,255,255,0.2)',
+              zIndex: 20,
+            }}
+            title="Click to unpin and follow active speaker"
+          >
+            <Pin size={13} color="var(--brand-light)" />
+            <span>Pinned (Click to unpin)</span>
+          </div>
+        )}
+
+        {/* Primary Participant Name Pill (Bottom Left) */}
+        <div style={{
+          position: 'absolute',
+          bottom: isMultiParty ? '120px' : '90px',
+          left: '24px',
+          backgroundColor: 'rgba(0,0,0,0.75)',
+          padding: '6px 14px',
+          borderRadius: '8px',
+          fontSize: '13px',
+          fontWeight: 500,
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          backdropFilter: 'blur(6px)',
+          border: '1px solid rgba(255,255,255,0.1)',
+          zIndex: 20,
+        }}>
+          <span>{activeScreenShare ? `Screen by ${activeScreenShare.name}` : primaryParticipant?.name}</span>
+          {primaryParticipant?.isSpeaking && (
+            <span style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#4ade80', fontSize: '11px', fontWeight: 600 }}>
+              <Volume2 size={13} />
+              <span>Speaking</span>
+            </span>
+          )}
+          {primaryParticipant?.isAudioMuted && <MicOff size={14} color="#c4314b" />}
+        </div>
+      </div>
+
+      {/* ================= 3. FLOATING PICTURE-IN-PICTURE (FOR 1-ON-1 CALLS) ================= */}
+      {isOneOnOne && secondaryParticipant && (
+        <div
+          onClick={() => setSwappedPiP(!swappedPiP)}
+          style={{
+            position: 'absolute',
+            bottom: '90px',
+            right: '24px',
+            width: '210px',
+            height: '130px',
+            borderRadius: '12px',
+            backgroundColor: '#1a1a1a',
+            overflow: 'hidden',
+            cursor: 'pointer',
+            zIndex: 25,
+            border: secondaryParticipant.isSpeaking ? '2px solid #22c55e' : '2px solid rgba(255,255,255,0.25)',
+            boxShadow: '0 8px 30px rgba(0,0,0,0.6)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            transition: 'transform 0.2s, border 0.2s',
+          }}
+          title="Click to swap main view"
+        >
+          {secondaryParticipant.cameraTrack && !secondaryParticipant.isVideoMuted ? (
+            <VideoTrackView
+              track={secondaryParticipant.cameraTrack}
+              fit="cover"
+              mirrored={secondaryParticipant.isLocal}
+            />
+          ) : (
+            <div style={{
+              width: '46px',
+              height: '46px',
+              borderRadius: '50%',
+              backgroundColor: 'var(--brand-primary)',
+              color: '#ffffff',
+              fontSize: '18px',
               fontWeight: 700,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',
             }}>
-              {displayName ? displayName.slice(0, 2).toUpperCase() : 'ME'}
+              {secondaryParticipant.name.slice(0, 2).toUpperCase()}
             </div>
           )}
 
+          {/* PiP Name Badge */}
           <div style={{
             position: 'absolute',
-            bottom: '12px',
-            left: '12px',
-            backgroundColor: 'rgba(0,0,0,0.65)',
-            padding: '4px 10px',
-            borderRadius: '4px',
-            fontSize: '12px',
-            fontWeight: 500,
+            bottom: '6px',
+            left: '6px',
+            right: '6px',
+            backgroundColor: 'rgba(0,0,0,0.75)',
+            padding: '3px 8px',
+            borderRadius: '6px',
+            fontSize: '11px',
             display: 'flex',
             alignItems: 'center',
-            gap: '6px',
+            justifyContent: 'space-between',
+            backdropFilter: 'blur(4px)',
           }}>
-            <span>{displayName || 'You'}</span>
-            {!isAudioEnabled && <MicOff size={13} color="#c4314b" />}
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {secondaryParticipant.name}
+            </span>
+            {secondaryParticipant.isAudioMuted && <MicOff size={11} color="#c4314b" style={{ flexShrink: 0 }} />}
           </div>
         </div>
+      )}
 
-        {/* Remote Video Gallery Container */}
-        <div
-          ref={remoteVideosRef}
-          style={{
-            display: 'flex',
-            gap: '16px',
-            flexWrap: 'wrap',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        />
-      </div>
+      {/* ================= 4. COMPACT PARTICIPANT THUMBNAIL STRIP (FOR 3+ PARTICIPANTS OR SCREEN SHARE) ================= */}
+      {isMultiParty && (
+        <div style={{
+          position: 'absolute',
+          bottom: '86px',
+          left: '20px',
+          right: '20px',
+          height: '96px',
+          display: 'flex',
+          gap: '10px',
+          overflowX: 'auto',
+          alignItems: 'center',
+          padding: '4px',
+          zIndex: 25,
+          pointerEvents: 'auto',
+        }}>
+          {participantsList.map((p) => {
+            const isMain = primaryParticipant?.id === p.id && !activeScreenShare;
+            return (
+              <div
+                key={p.id}
+                onClick={() => setFocusedParticipantId(p.id)}
+                style={{
+                  width: '144px',
+                  height: '88px',
+                  borderRadius: '10px',
+                  backgroundColor: '#1f1f1f',
+                  position: 'relative',
+                  overflow: 'hidden',
+                  cursor: 'pointer',
+                  flexShrink: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  border: p.isSpeaking
+                    ? '2px solid #22c55e'
+                    : isMain
+                    ? '2px solid #5b5fc7'
+                    : '1px solid rgba(255,255,255,0.2)',
+                  boxShadow: p.isSpeaking ? '0 0 12px rgba(34, 197, 94, 0.5)' : '0 4px 12px rgba(0,0,0,0.4)',
+                  transition: 'border 0.15s, transform 0.15s',
+                }}
+                title={`Click to focus on ${p.name}`}
+              >
+                {p.cameraTrack && !p.isVideoMuted ? (
+                  <VideoTrackView
+                    track={p.cameraTrack}
+                    fit="cover"
+                    mirrored={p.isLocal}
+                  />
+                ) : (
+                  <div style={{
+                    width: '38px',
+                    height: '38px',
+                    borderRadius: '50%',
+                    backgroundColor: 'var(--brand-primary)',
+                    color: '#ffffff',
+                    fontSize: '15px',
+                    fontWeight: 700,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}>
+                    {p.name.slice(0, 2).toUpperCase()}
+                  </div>
+                )}
 
-      {/* Floating Call Controls Bar (Microsoft Teams Style) */}
+                {/* Name Pill on Thumbnail */}
+                <div style={{
+                  position: 'absolute',
+                  bottom: '6px',
+                  left: '6px',
+                  right: '6px',
+                  backgroundColor: 'rgba(0,0,0,0.75)',
+                  padding: '2px 6px',
+                  borderRadius: '4px',
+                  fontSize: '11px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  overflow: 'hidden',
+                }}>
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {p.name}
+                  </span>
+                  {p.isAudioMuted && <MicOff size={11} color="#c4314b" style={{ flexShrink: 0, marginLeft: '4px' }} />}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ================= 5. FLOATING BOTTOM CONTROL TOOLBAR ================= */}
       <div style={{
-        height: '76px',
-        backgroundColor: '#1f1f1f',
-        borderTop: '1px solid #333333',
+        position: 'absolute',
+        bottom: '18px',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        height: '60px',
+        backgroundColor: 'rgba(26, 26, 26, 0.88)',
+        backdropFilter: 'blur(16px)',
+        border: '1px solid rgba(255,255,255,0.15)',
+        boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+        borderRadius: '30px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: '14px',
-        position: 'relative',
-        zIndex: 20,
+        padding: '0 16px',
+        gap: '12px',
+        zIndex: 35,
       }}>
         {/* Mic Button */}
         <button
           onClick={toggleMic}
           className="teams-btn"
           style={{
-            width: '46px',
-            height: '46px',
+            width: '42px',
+            height: '42px',
             borderRadius: '50%',
-            backgroundColor: isAudioEnabled ? '#333333' : '#c4314b',
+            backgroundColor: isAudioEnabled ? 'rgba(255,255,255,0.1)' : '#c4314b',
             color: '#ffffff',
             padding: 0,
             transition: 'background-color 0.2s',
           }}
           title={isAudioEnabled ? 'Mute Microphone' : 'Unmute Microphone'}
         >
-          {isAudioEnabled ? <Mic size={20} /> : <MicOff size={20} />}
+          {isAudioEnabled ? <Mic size={19} /> : <MicOff size={19} />}
         </button>
 
         {/* Cam Button */}
@@ -1166,17 +1655,17 @@ export const CallRoom: React.FC = () => {
           onClick={toggleCam}
           className="teams-btn"
           style={{
-            width: '46px',
-            height: '46px',
+            width: '42px',
+            height: '42px',
             borderRadius: '50%',
-            backgroundColor: isVideoEnabled ? '#333333' : '#c4314b',
+            backgroundColor: isVideoEnabled ? 'rgba(255,255,255,0.1)' : '#c4314b',
             color: '#ffffff',
             padding: 0,
             transition: 'background-color 0.2s',
           }}
           title={isVideoEnabled ? 'Turn Off Camera' : 'Turn On Camera'}
         >
-          {isVideoEnabled ? <VideoIcon size={20} /> : <VideoOff size={20} />}
+          {isVideoEnabled ? <VideoIcon size={19} /> : <VideoOff size={19} />}
         </button>
 
         {/* Screen Share Button */}
@@ -1184,17 +1673,17 @@ export const CallRoom: React.FC = () => {
           onClick={toggleScreenShare}
           className="teams-btn"
           style={{
-            width: '46px',
-            height: '46px',
+            width: '42px',
+            height: '42px',
             borderRadius: '50%',
-            backgroundColor: isScreenSharing ? 'var(--brand-primary)' : '#333333',
+            backgroundColor: isScreenSharing ? 'var(--brand-primary)' : 'rgba(255,255,255,0.1)',
             color: '#ffffff',
             padding: 0,
             transition: 'background-color 0.2s',
           }}
           title={isScreenSharing ? 'Stop Sharing' : 'Share Screen'}
         >
-          <Monitor size={20} />
+          <Monitor size={19} />
         </button>
 
         {/* Reactions Picker Button */}
@@ -1203,17 +1692,17 @@ export const CallRoom: React.FC = () => {
             onClick={() => setIsReactionPickerOpen(!isReactionPickerOpen)}
             className="teams-btn"
             style={{
-              width: '46px',
-              height: '46px',
+              width: '42px',
+              height: '42px',
               borderRadius: '50%',
-              backgroundColor: isReactionPickerOpen ? 'var(--brand-primary)' : '#333333',
+              backgroundColor: isReactionPickerOpen ? 'var(--brand-primary)' : 'rgba(255,255,255,0.1)',
               color: '#ffffff',
               padding: 0,
               transition: 'background-color 0.2s',
             }}
             title="React"
           >
-            <Smile size={20} />
+            <Smile size={19} />
           </button>
 
           {isReactionPickerOpen && (
@@ -1227,8 +1716,8 @@ export const CallRoom: React.FC = () => {
               padding: '6px 12px',
               display: 'flex',
               gap: '10px',
-              boxShadow: '0 6px 20px rgba(0,0,0,0.5)',
-              border: '1px solid #444444',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.6)',
+              border: '1px solid rgba(255,255,255,0.15)',
             }}>
               {['👍', '👏', '❤️', '😂', '🎉', '👋'].map((emoji) => (
                 <button
@@ -1257,17 +1746,17 @@ export const CallRoom: React.FC = () => {
           onClick={openAddPeopleModal}
           className="teams-btn"
           style={{
-            width: '46px',
-            height: '46px',
+            width: '42px',
+            height: '42px',
             borderRadius: '50%',
-            backgroundColor: '#333333',
+            backgroundColor: 'rgba(255,255,255,0.1)',
             color: '#ffffff',
             padding: 0,
             transition: 'background-color 0.2s',
           }}
           title="Add People to Call"
         >
-          <UserPlus size={20} />
+          <UserPlus size={19} />
         </button>
 
         {/* Share Files Button */}
@@ -1275,10 +1764,10 @@ export const CallRoom: React.FC = () => {
           onClick={() => setIsFilesDrawerOpen(!isFilesDrawerOpen)}
           className="teams-btn"
           style={{
-            width: '46px',
-            height: '46px',
+            width: '42px',
+            height: '42px',
             borderRadius: '50%',
-            backgroundColor: isFilesDrawerOpen ? 'var(--brand-primary)' : '#333333',
+            backgroundColor: isFilesDrawerOpen ? 'var(--brand-primary)' : 'rgba(255,255,255,0.1)',
             color: '#ffffff',
             padding: 0,
             position: 'relative',
@@ -1286,12 +1775,12 @@ export const CallRoom: React.FC = () => {
           }}
           title="Meeting Files"
         >
-          <Paperclip size={20} />
+          <Paperclip size={19} />
           {meetingFiles.length > 0 && (
             <span style={{
               position: 'absolute',
-              top: '4px',
-              right: '4px',
+              top: '2px',
+              right: '2px',
               backgroundColor: 'var(--brand-primary)',
               color: '#fff',
               fontSize: '10px',
@@ -1313,14 +1802,15 @@ export const CallRoom: React.FC = () => {
           onClick={leaveMeeting}
           className="teams-btn teams-btn-danger"
           style={{
-            height: '46px',
-            padding: '0 24px',
-            borderRadius: '23px',
+            height: '40px',
+            padding: '0 20px',
+            borderRadius: '20px',
             fontWeight: 600,
-            fontSize: '14px',
+            fontSize: '13px',
+            backgroundColor: '#c4314b',
           }}
         >
-          <PhoneOff size={18} />
+          <PhoneOff size={16} />
           <span>Leave</span>
         </button>
 
@@ -1330,9 +1820,9 @@ export const CallRoom: React.FC = () => {
             onClick={endMeetingForAll}
             className="teams-btn"
             style={{
-              height: '46px',
-              padding: '0 20px',
-              borderRadius: '23px',
+              height: '40px',
+              padding: '0 18px',
+              borderRadius: '20px',
               backgroundColor: '#a80000',
               color: '#ffffff',
               fontWeight: 600,
@@ -1343,7 +1833,7 @@ export const CallRoom: React.FC = () => {
             }}
             title="End meeting for all participants"
           >
-            <PhoneOff size={16} />
+            <PhoneOff size={15} />
             <span>End Meeting</span>
           </button>
         )}
@@ -1354,7 +1844,7 @@ export const CallRoom: React.FC = () => {
         <div style={{
           position: 'fixed',
           inset: 0,
-          backgroundColor: 'rgba(0,0,0,0.65)',
+          backgroundColor: 'rgba(0,0,0,0.7)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -1362,13 +1852,14 @@ export const CallRoom: React.FC = () => {
         }}>
           <div style={{
             backgroundColor: '#262626',
-            borderRadius: '10px',
+            borderRadius: '12px',
             width: '460px',
             maxHeight: '520px',
             padding: '24px',
             border: '1px solid #444444',
             display: 'flex',
             flexDirection: 'column',
+            boxShadow: '0 12px 36px rgba(0,0,0,0.6)',
           }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
               <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0 }}>Add People to Call</h3>
@@ -1439,20 +1930,20 @@ export const CallRoom: React.FC = () => {
         </div>
       )}
 
-      {/* ================= DRAWER / MODAL: MEETING FILE SHARING ================= */}
+      {/* ================= DRAWER: MEETING FILE SHARING ================= */}
       {isFilesDrawerOpen && (
         <div style={{
           position: 'fixed',
-          top: '56px',
+          top: 0,
           right: 0,
-          bottom: '76px',
+          bottom: 0,
           width: '360px',
           backgroundColor: '#212121',
           borderLeft: '1px solid #333333',
-          zIndex: 40,
+          zIndex: 45,
           display: 'flex',
           flexDirection: 'column',
-          boxShadow: '-6px 0 24px rgba(0,0,0,0.4)',
+          boxShadow: '-8px 0 32px rgba(0,0,0,0.6)',
         }}>
           <div style={{
             padding: '16px',

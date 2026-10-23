@@ -42,11 +42,14 @@ export const JoinMeetingModal: React.FC<JoinMeetingModalProps> = ({ isOpen, onCl
       // Navigate to call room with credentials in state
       navigate('/call-room', {
         state: {
+          meetingId: resp.meeting_id,
           meetingToken: resp.token,
           livekitUrl: resp.livekit_url,
           roomName: resp.room_name,
           title: resp.title,
           displayName: resp.display_name,
+          isHost: false,
+          initialVideo: true,
         },
       });
     } catch (err: any) {

@@ -4,6 +4,7 @@ import { useAuth } from '../../state/AuthContext';
 import { api } from '../../services/api';
 import { wsClient } from '../../services/websocket';
 import { Conversation, Message, User } from '../../types';
+import { MemberProfileModal } from '../../components/common/MemberProfileModal';
 import {
   MessageSquare,
   Users,
@@ -23,7 +24,11 @@ import {
   Square,
   Clock,
   ExternalLink,
-  ChevronRight
+  ChevronRight,
+  Mic,
+  Trash2,
+  MoreVertical,
+  AlertCircle
 } from 'lucide-react';
 
 interface StagedFile {
@@ -67,13 +72,29 @@ export const ChatPage: React.FC = () => {
   // Presence State
   const [presenceMap, setPresenceMap] = useState<Record<string, string>>({});
 
-  // New Group Modal State
+  // Member Profile Modal State
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [selectedProfileId, setSelectedProfileId] = useState<string | number | null>(null);
+
+  // Conversation Context Menu / Remove Conversation State
+  const [convMenuOpenId, setConvMenuOpenId] = useState<string | null>(null);
+  const [convToRemove, setConvToRemove] = useState<Conversation | null>(null);
+
+  // New Group Modal State & Validation
   const [isNewGroupModalOpen, setIsNewGroupModalOpen] = useState(false);
   const [groupTitle, setGroupTitle] = useState('');
+  const [groupError, setGroupError] = useState<string | null>(null);
   const [directorySearch, setDirectorySearch] = useState('');
   const [colleagues, setColleagues] = useState<any[]>([]);
   const [selectedColleagueIds, setSelectedColleagueIds] = useState<string[]>([]);
   const [creatingGroup, setCreatingGroup] = useState(false);
+
+  // Voice Message Recording State
+  const [isRecordingAudio, setIsRecordingAudio] = useState(false);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordingTimerRef = useRef<any>(null);
 
   // File Upload State
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
@@ -436,6 +457,7 @@ export const ChatPage: React.FC = () => {
   const openNewGroupModal = async () => {
     setIsNewGroupModalOpen(true);
     setGroupTitle('');
+    setGroupError(null);
     setSelectedColleagueIds([]);
     setDirectorySearch('');
     if (activeOrganization) {
@@ -454,9 +476,21 @@ export const ChatPage: React.FC = () => {
     );
   };
 
-  // Create Group or Direct Chat
+  // Create Group or Direct Chat with validation
   const handleCreateGroup = async () => {
-    if (selectedColleagueIds.length === 0) return;
+    setGroupError(null);
+    if (selectedColleagueIds.length === 0) {
+      setGroupError('Please select at least one member.');
+      return;
+    }
+
+    // Validation: Require group name when creating a group
+    const isGroup = selectedColleagueIds.length > 1;
+    if (isGroup && !groupTitle.trim()) {
+      setGroupError('Group name is required.');
+      return;
+    }
+
     setCreatingGroup(true);
     try {
       if (selectedColleagueIds.length === 1 && !groupTitle.trim()) {
@@ -471,7 +505,7 @@ export const ChatPage: React.FC = () => {
         setActiveConv(resp);
       } else {
         // Group conversation
-        const title = groupTitle.trim() || 'New Group';
+        const title = groupTitle.trim();
         const resp = await api.post<Conversation>('/api/v1/messaging/conversations/', {
           conversation_type: 'group',
           title,
@@ -484,10 +518,134 @@ export const ChatPage: React.FC = () => {
       }
     } catch (err: any) {
       console.error('Failed to create group chat', err);
-      alert(err.message || 'Failed to create group');
+      setGroupError(err.message || 'Failed to create group');
     } finally {
       setCreatingGroup(false);
     }
+  };
+
+  // Remove / Hide Conversation handler
+  const handleConfirmRemoveConversation = async () => {
+    if (!convToRemove) return;
+    try {
+      await api.post(`/api/v1/messaging/conversations/${convToRemove.id}/remove-for-user/`);
+      const updated = conversations.filter((c) => c.id !== convToRemove.id);
+      setConversations(updated);
+      if (activeConv?.id === convToRemove.id) {
+        setActiveConv(updated.length > 0 ? updated[0] : null);
+      }
+      setConvToRemove(null);
+      setConvMenuOpenId(null);
+    } catch (err: any) {
+      console.error('Failed to remove conversation', err);
+      alert(err.message || 'Failed to remove conversation');
+    }
+  };
+
+  // Voice Message Recording Methods
+  const startAudioRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunksRef.current = [];
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
+        }
+      };
+
+      recorder.start();
+      setIsRecordingAudio(true);
+      setAudioDuration(0);
+
+      recordingTimerRef.current = setInterval(() => {
+        setAudioDuration((d) => d + 1);
+      }, 1000);
+    } catch (err) {
+      console.error('Microphone access error', err);
+      alert('Could not access microphone. Please grant audio permissions.');
+    }
+  };
+
+  const cancelAudioRecording = () => {
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.stream.getTracks().forEach((t) => t.stop());
+      mediaRecorderRef.current = null;
+    }
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    audioChunksRef.current = [];
+    setIsRecordingAudio(false);
+    setAudioDuration(0);
+  };
+
+  const sendAudioRecording = async () => {
+    if (!mediaRecorderRef.current || !activeConv) return;
+    const recorder = mediaRecorderRef.current;
+
+    recorder.onstop = async () => {
+      recorder.stream.getTracks().forEach((t) => t.stop());
+      const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+      const audioFile = new File([audioBlob], `voice_${Date.now()}.webm`, { type: 'audio/webm' });
+
+      try {
+        const formData = new FormData();
+        formData.append('file', audioFile);
+        formData.append('conversation_id', activeConv.id);
+        if (activeOrganization) {
+          formData.append('organization_id', activeOrganization.id);
+        }
+
+        const uploadResp = await api.post<any>('/api/v1/files/upload/', formData);
+
+        const voiceAttachment = {
+          id: uploadResp.id,
+          name: uploadResp.filename || audioFile.name,
+          filename: uploadResp.filename || audioFile.name,
+          url: uploadResp.download_url,
+          download_url: uploadResp.download_url || `/api/v1/files/${uploadResp.id}/download/`,
+          size: uploadResp.file_size || audioBlob.size,
+          file_size: uploadResp.file_size || audioBlob.size,
+          type: 'audio/webm',
+          mime_type: 'audio/webm',
+          is_voice: true,
+        };
+
+        const resp = await api.post<Message>(
+          `/api/v1/messaging/conversations/${activeConv.id}/messages/`,
+          {
+            content: '🎤 Voice message',
+            attachments: [voiceAttachment],
+          }
+        );
+
+        setMessages((prev) => [...prev, resp]);
+        setTimeout(scrollToBottom, 50);
+        loadConversations();
+      } catch (err) {
+        console.error('Failed to send voice message', err);
+        alert('Failed to send voice message. Please try again.');
+      } finally {
+        setIsRecordingAudio(false);
+        setAudioDuration(0);
+        if (recordingTimerRef.current) {
+          clearInterval(recordingTimerRef.current);
+          recordingTimerRef.current = null;
+        }
+      }
+    };
+
+    recorder.stop();
+  };
+
+  const formatAudioTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
 
   // Meeting Call handlers
@@ -517,11 +675,14 @@ export const ChatPage: React.FC = () => {
 
       navigate('/call-room', {
         state: {
+          meetingId: meetingResp.id,
           meetingToken: joinResp.token,
           livekitUrl: joinResp.livekit_url,
           roomName: joinResp.room_name,
           title: joinResp.title,
           displayName: joinResp.display_name,
+          isHost: true,
+          initialVideo: callType === 'video',
         },
       });
     } catch (err) {
@@ -536,16 +697,26 @@ export const ChatPage: React.FC = () => {
       });
       navigate('/call-room', {
         state: {
+          meetingId: joinResp.meeting_id,
           meetingToken: joinResp.token,
           livekitUrl: joinResp.livekit_url,
           roomName: joinResp.room_name,
           title: joinResp.title,
           displayName: joinResp.display_name,
+          isHost: joinResp.is_host ?? false,
+          initialVideo: true,
         },
       });
     } catch (err) {
       console.error('Failed to join meeting room', err);
     }
+  };
+
+  // Helper to get other participant for direct conversations
+  const getOtherParticipant = (conv?: Conversation | null) => {
+    if (!conv || conv.conversation_type !== 'direct' || !conv.participants) return null;
+    const otherPart = conv.participants.find((p) => p.user?.id !== user?.id);
+    return otherPart?.user || null;
   };
 
   // Helper to get conversation presence
@@ -633,6 +804,7 @@ export const ChatPage: React.FC = () => {
                     backgroundColor: isSelected ? 'var(--bg-hover)' : 'transparent',
                     borderLeft: isSelected ? '3px solid var(--brand-primary)' : '3px solid transparent',
                     transition: 'background-color 0.15s',
+                    position: 'relative',
                   }}
                 >
                   {/* Avatar with Presence Indicator */}
@@ -703,6 +875,69 @@ export const ChatPage: React.FC = () => {
                       {conv.unread_count}
                     </span>
                   )}
+
+                  {/* 3-dots action menu for removing conversation */}
+                  <div style={{ position: 'relative' }}>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setConvMenuOpenId(convMenuOpenId === conv.id ? null : conv.id);
+                      }}
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'var(--text-muted)',
+                        cursor: 'pointer',
+                        padding: '4px',
+                        borderRadius: '4px',
+                        display: 'flex',
+                        alignItems: 'center',
+                      }}
+                      title="More options"
+                    >
+                      <MoreVertical size={14} />
+                    </button>
+                    {convMenuOpenId === conv.id && (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: '100%',
+                          right: 0,
+                          backgroundColor: 'var(--bg-secondary)',
+                          border: '1px solid var(--border-color)',
+                          borderRadius: '6px',
+                          boxShadow: '0 8px 18px rgba(0,0,0,0.3)',
+                          zIndex: 50,
+                          minWidth: '150px',
+                          padding: '4px 0',
+                        }}
+                      >
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setConvToRemove(conv);
+                            setConvMenuOpenId(null);
+                          }}
+                          style={{
+                            width: '100%',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            padding: '8px 12px',
+                            background: 'transparent',
+                            border: 'none',
+                            color: 'var(--danger)',
+                            fontSize: '12px',
+                            cursor: 'pointer',
+                            textAlign: 'left',
+                          }}
+                        >
+                          <Trash2 size={13} />
+                          <span>Remove chat</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               );
             })
@@ -724,7 +959,22 @@ export const ChatPage: React.FC = () => {
               justifyContent: 'space-between',
               backgroundColor: 'var(--bg-secondary)',
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '12px',
+                  cursor: activeConv.conversation_type === 'direct' ? 'pointer' : 'default',
+                }}
+                onClick={() => {
+                  const other = getOtherParticipant(activeConv);
+                  if (other) {
+                    setSelectedProfileId(other.id);
+                    setProfileModalOpen(true);
+                  }
+                }}
+                title={activeConv.conversation_type === 'direct' ? 'View Profile' : undefined}
+              >
                 <div style={{ position: 'relative' }}>
                   <div style={{
                     width: '32px',
@@ -769,6 +1019,11 @@ export const ChatPage: React.FC = () => {
                     }}>
                       {activeConv.conversation_type}
                     </span>
+                    {activeConv.conversation_type === 'direct' && (
+                      <span style={{ fontSize: '11px', color: 'var(--brand-light)' }}>
+                        (Click for profile)
+                      </span>
+                    )}
                   </div>
                   {getConversationPresence(activeConv) && (
                     <div style={{ fontSize: '11px', color: 'var(--text-secondary)', textTransform: 'capitalize' }}>
@@ -882,7 +1137,22 @@ export const ChatPage: React.FC = () => {
                             fontSize: '12px',
                             color: 'var(--text-secondary)',
                           }}>
-                            <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{msg.sender_name}</span>
+                            <span
+                              onClick={() => {
+                                if (msg.sender?.id) {
+                                  setSelectedProfileId(msg.sender.id);
+                                  setProfileModalOpen(true);
+                                }
+                              }}
+                              style={{
+                                fontWeight: 600,
+                                color: 'var(--text-primary)',
+                                cursor: msg.sender?.id ? 'pointer' : 'default',
+                              }}
+                              title={msg.sender?.id ? 'Click to view profile' : undefined}
+                            >
+                              {msg.sender_name}
+                            </span>
                             <span>{new Date(msg.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                           </div>
 
@@ -950,8 +1220,32 @@ export const ChatPage: React.FC = () => {
                                 {msg.attachments.map((att: any, idx: number) => {
                                   const filename = att.filename || att.name || 'Attachment';
                                   const size = att.file_size || att.size || 0;
+                                  const isVoice = att.is_voice || (att.mime_type || '').startsWith('audio/');
                                   const isImg = (att.mime_type || att.type || '').startsWith('image/');
                                   const dlUrl = att.download_url || att.url || `/api/v1/files/${att.id}/download/`;
+
+                                  if (isVoice) {
+                                    return (
+                                      <div
+                                        key={idx}
+                                        style={{
+                                          backgroundColor: isMe ? 'rgba(0,0,0,0.2)' : 'var(--bg-hover)',
+                                          borderRadius: '6px',
+                                          padding: '8px 12px',
+                                          display: 'flex',
+                                          flexDirection: 'column',
+                                          gap: '6px',
+                                          minWidth: '240px',
+                                        }}
+                                      >
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 600 }}>
+                                          <Mic size={14} color={isMe ? '#fff' : 'var(--brand-primary)'} />
+                                          <span>Voice Message</span>
+                                        </div>
+                                        <audio controls src={dlUrl} style={{ width: '100%', height: '36px' }} />
+                                      </div>
+                                    );
+                                  }
 
                                   return (
                                     <div
@@ -1034,7 +1328,7 @@ export const ChatPage: React.FC = () => {
 
                           {/* Quick Reaction Tray on hover */}
                           <div style={{ display: 'flex', gap: '4px', marginTop: '2px', opacity: 0.7 }}>
-                            {['👍', '❤️', '👏', '🎉'].map((emoji) => (
+                            {['👍', '❤️', '👏', '🎉', '😂', '💡'].map((emoji) => (
                               <button
                                 key={emoji}
                                 onClick={() => handleToggleReaction(msg.id, emoji)}
@@ -1213,61 +1507,115 @@ export const ChatPage: React.FC = () => {
                   )}
 
                   {/* Composer input & action buttons */}
-                  <form onSubmit={handleSendMessage} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    {/* Hidden file input */}
-                    <input
-                      type="file"
-                      ref={fileInputRef}
-                      style={{ display: 'none' }}
-                      multiple
-                      onChange={handleFileUpload}
-                    />
+                  {isRecordingAudio ? (
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '12px',
+                      backgroundColor: 'var(--bg-hover)',
+                      borderRadius: '6px',
+                      padding: '8px 14px',
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--danger)', fontWeight: 600, fontSize: '13px' }}>
+                        <span style={{
+                          width: '10px',
+                          height: '10px',
+                          borderRadius: '50%',
+                          backgroundColor: 'var(--danger)',
+                          display: 'inline-block',
+                        }} />
+                        <span>Recording voice message... ({formatAudioTime(audioDuration)})</span>
+                      </div>
+                      <div style={{ marginLeft: 'auto', display: 'flex', gap: '8px' }}>
+                        <button
+                          type="button"
+                          onClick={cancelAudioRecording}
+                          className="teams-btn teams-btn-secondary"
+                          style={{ height: '34px', padding: '0 10px', fontSize: '12px', color: 'var(--danger)' }}
+                        >
+                          <Trash2 size={14} />
+                          <span>Cancel</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={sendAudioRecording}
+                          className="teams-btn teams-btn-primary"
+                          style={{ height: '34px', padding: '0 12px', fontSize: '12px', gap: '6px' }}
+                        >
+                          <Send size={14} />
+                          <span>Send Voice</span>
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <form onSubmit={handleSendMessage} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      {/* Hidden file input */}
+                      <input
+                        type="file"
+                        ref={fileInputRef}
+                        style={{ display: 'none' }}
+                        multiple
+                        onChange={handleFileUpload}
+                      />
 
-                    {/* Paperclip file attach button */}
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={isUploadingFile}
-                      className="teams-btn teams-btn-secondary"
-                      style={{ height: '38px', width: '38px', padding: 0, justifyContent: 'center' }}
-                      title="Attach file"
-                    >
-                      <Paperclip size={18} color="var(--brand-primary)" />
-                    </button>
+                      {/* Paperclip file attach button */}
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={isUploadingFile}
+                        className="teams-btn teams-btn-secondary"
+                        style={{ height: '38px', width: '38px', padding: 0, justifyContent: 'center' }}
+                        title="Attach file"
+                      >
+                        <Paperclip size={18} color="var(--brand-primary)" />
+                      </button>
 
-                    {/* Emoji toggle button */}
-                    <button
-                      type="button"
-                      onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                      className="teams-btn teams-btn-secondary"
-                      style={{ height: '38px', width: '38px', padding: 0, justifyContent: 'center' }}
-                      title="Insert emoji"
-                    >
-                      <Smile size={18} color="var(--brand-primary)" />
-                    </button>
+                      {/* Voice recording button */}
+                      <button
+                        type="button"
+                        onClick={startAudioRecording}
+                        disabled={isUploadingFile}
+                        className="teams-btn teams-btn-secondary"
+                        style={{ height: '38px', width: '38px', padding: 0, justifyContent: 'center' }}
+                        title="Record voice message"
+                      >
+                        <Mic size={18} color="var(--brand-primary)" />
+                      </button>
 
-                    {/* Text input */}
-                    <input
-                      ref={inputRef}
-                      type="text"
-                      placeholder="Type a message or @ to mention colleagues (Enter to send)"
-                      value={inputText}
-                      onChange={handleInputChange}
-                      className="teams-input"
-                      style={{ flex: 1, height: '38px' }}
-                    />
+                      {/* Emoji toggle button */}
+                      <button
+                        type="button"
+                        onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+                        className="teams-btn teams-btn-secondary"
+                        style={{ height: '38px', width: '38px', padding: 0, justifyContent: 'center' }}
+                        title="Insert emoji"
+                      >
+                        <Smile size={18} color="var(--brand-primary)" />
+                      </button>
 
-                    {/* Send button */}
-                    <button
-                      type="submit"
-                      disabled={(!inputText.trim() && stagedFiles.length === 0) || isUploadingFile}
-                      className="teams-btn teams-btn-primary"
-                      style={{ height: '38px', padding: '0 16px', gap: '6px' }}
-                    >
-                      <Send size={15} />
-                      <span>Send</span>
-                    </button>
-                  </form>
+                      {/* Text input */}
+                      <input
+                        ref={inputRef}
+                        type="text"
+                        placeholder="Type a message or @ to mention colleagues (Enter to send)"
+                        value={inputText}
+                        onChange={handleInputChange}
+                        className="teams-input"
+                        style={{ flex: 1, height: '38px' }}
+                      />
+
+                      {/* Send button */}
+                      <button
+                        type="submit"
+                        disabled={(!inputText.trim() && stagedFiles.length === 0) || isUploadingFile}
+                        className="teams-btn teams-btn-primary"
+                        style={{ height: '38px', padding: '0 16px', gap: '6px' }}
+                      >
+                        <Send size={15} />
+                        <span>Send</span>
+                      </button>
+                    </form>
+                  )}
                   {isUploadingFile && (
                     <div style={{ fontSize: '11px', color: 'var(--brand-primary)', marginTop: '4px' }}>
                       Uploading file attachment...
@@ -1425,9 +1773,31 @@ export const ChatPage: React.FC = () => {
                 placeholder="e.g. Engineering Project Sync"
                 className="teams-input"
                 value={groupTitle}
-                onChange={(e) => setGroupTitle(e.target.value)}
+                onChange={(e) => {
+                  setGroupTitle(e.target.value);
+                  if (groupError) setGroupError(null);
+                }}
               />
             </div>
+
+            {/* Validation Error Banner */}
+            {groupError && (
+              <div style={{
+                padding: '8px 12px',
+                backgroundColor: 'rgba(219,53,69,0.1)',
+                border: '1px solid var(--danger)',
+                borderRadius: '4px',
+                color: 'var(--danger)',
+                fontSize: '12px',
+                marginBottom: '14px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+              }}>
+                <AlertCircle size={14} />
+                <span>{groupError}</span>
+              </div>
+            )}
 
             {/* Colleague Search Filter */}
             <div style={{ marginBottom: '12px' }}>
@@ -1617,6 +1987,63 @@ export const ChatPage: React.FC = () => {
           ))}
         </div>
       )}
+
+      {/* Remove Conversation Confirmation Modal */}
+      {convToRemove && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1100,
+        }}>
+          <div style={{
+            backgroundColor: 'var(--bg-secondary)',
+            border: '1px solid var(--border-color)',
+            borderRadius: '8px',
+            padding: '24px',
+            maxWidth: '440px',
+            width: '90%',
+            boxShadow: '0 12px 32px rgba(0,0,0,0.4)',
+          }}>
+            <h3 style={{ margin: '0 0 10px 0', fontSize: '16px', fontWeight: 600 }}>Remove Chat</h3>
+            <p style={{ margin: '0 0 18px 0', fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+              Are you sure you want to remove <strong>"{convToRemove.title || 'this conversation'}"</strong> from your chat list?
+              <br /><br />
+              Your message history will be preserved, and the conversation will reappear if someone sends a new message.
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+              <button
+                type="button"
+                onClick={() => setConvToRemove(null)}
+                className="teams-btn teams-btn-secondary"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmRemoveConversation}
+                className="teams-btn teams-btn-primary"
+                style={{ backgroundColor: 'var(--danger)', borderColor: 'var(--danger)' }}
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Member Profile Modal */}
+      <MemberProfileModal
+        isOpen={profileModalOpen}
+        onClose={() => {
+          setProfileModalOpen(false);
+          setSelectedProfileId(null);
+        }}
+        memberId={selectedProfileId}
+      />
     </div>
   );
 };

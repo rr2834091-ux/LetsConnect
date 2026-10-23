@@ -3,8 +3,11 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 
+from apps.memberships.search_view import UnifiedSearchView
+
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('api/v1/search/', UnifiedSearchView.as_view(), name='unified-search'),
     path('api/v1/auth/', include('apps.accounts.urls')),
     path('api/v1/organizations/', include('apps.organizations.urls')),
     path('api/v1/memberships/', include('apps.memberships.urls')),

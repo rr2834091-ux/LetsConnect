@@ -18,6 +18,7 @@ class AuthTests(TestCase):
         )
         self.emp = Employee.objects.create(
             organization=self.org,
+            employee_id="EMP_JANE",
             first_name="Jane",
             last_name="Doe",
             email="jane@acme.com",
@@ -131,6 +132,7 @@ class AuthTests(TestCase):
         # emp 'jane@acme.com' exists in Employee table, but if auth_user doesn't exist yet:
         Employee.objects.create(
             organization=self.org,
+            employee_id="EMP_BOB",
             first_name="Bob",
             last_name="Smith",
             email="bob@acme.com",
@@ -154,7 +156,7 @@ class AuthTests(TestCase):
     def test_google_auth_missing_id_token(self):
         resp = self.client.post('/api/v1/auth/google/', {})
         self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.data.get("detail"), "id_token is required.")
+        self.assertEqual(resp.data.get("detail"), "Google ID token or access token is required.")
 
     @patch('requests.get')
     def test_google_auth_invalid_token(self, mock_get):

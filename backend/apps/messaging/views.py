@@ -48,11 +48,11 @@ class ConversationListCreateView(generics.ListCreateAPIView):
 
             qs = qs.filter(
                 Q(organization_id=org_id, channel_id__in=accessible_channel_ids) |
-                Q(organization_id=org_id, participants__user=user)
+                Q(organization_id=org_id, participants__user=user, participants__is_hidden=False)
             )
         else:
-            # Personal context: conversations where user is a participant and no organization
-            qs = qs.filter(organization__isnull=True, participants__user=user)
+            # Personal context: conversations where user is a participant and not hidden
+            qs = qs.filter(organization__isnull=True, participants__user=user, participants__is_hidden=False)
 
         if conv_type:
             qs = qs.filter(conversation_type=conv_type)
@@ -94,6 +94,7 @@ class ConversationListCreateView(generics.ListCreateAPIView):
                 ).filter(participants__user=recipient).first()
 
                 if existing:
+                    ConversationParticipant.objects.filter(conversation=existing, user=user).update(is_hidden=False)
                     serializer = self.get_serializer(existing)
                     return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -107,10 +108,12 @@ class ConversationListCreateView(generics.ListCreateAPIView):
                 ConversationParticipant.objects.create(conversation=conv, user=recipient, role='member')
 
             elif conv_type == 'group':
+                if not title or not str(title).strip():
+                    return Response({"detail": "Group name is required."}, status=status.HTTP_400_BAD_REQUEST)
                 conv = Conversation.objects.create(
                     conversation_type='group',
                     organization_id=org_id,
-                    title=title or "Group Conversation",
+                    title=str(title).strip(),
                     created_by=user
                 )
                 ConversationParticipant.objects.create(conversation=conv, user=user, role='admin')
@@ -187,6 +190,9 @@ class MessageListCreateView(generics.ListCreateAPIView):
             )
             conv.updated_at = timezone.now()
             conv.save(update_fields=['updated_at'])
+
+            # Unhide conversation for all participants when a new message arrives
+            ConversationParticipant.objects.filter(conversation=conv).update(is_hidden=False)
 
             # Mark conversation read for this sender
             ConversationParticipant.objects.filter(
@@ -335,3 +341,42 @@ class ConversationMediaView(APIView):
             "count": len(results),
             "results": results
         })
+
+
+class RemoveConversationView(APIView):
+    """
+    Remove conversation from user's chat list, or delete for all if authorized.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, id):
+        try:
+            conv = Conversation.objects.get(id=id)
+        except Conversation.DoesNotExist:
+            return Response({"detail": "Conversation not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        delete_for_everyone = request.data.get('delete_for_everyone', False)
+        if delete_for_everyone:
+            from apps.permissions.evaluator import is_org_admin
+            is_admin = (conv.created_by == request.user) or (
+                conv.organization_id and is_org_admin(request.user, conv.organization_id)
+            )
+            if not is_admin:
+                return Response(
+                    {"detail": "You do not have permission to delete this conversation for all participants."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            conv.delete()
+            return Response({"detail": "Conversation deleted for all participants."})
+        else:
+            part = ConversationParticipant.objects.filter(conversation=conv, user=request.user).first()
+            if part:
+                if conv.conversation_type == 'group':
+                    part.delete()
+                else:
+                    part.is_hidden = True
+                    part.save(update_fields=['is_hidden'])
+            return Response({"detail": "Conversation removed from your chat list."})
+
+    def delete(self, request, id):
+        return self.post(request, id)

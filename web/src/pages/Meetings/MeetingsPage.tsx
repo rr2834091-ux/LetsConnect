@@ -22,7 +22,7 @@ import {
   ChevronDown
 } from 'lucide-react';
 
-type CalendarViewMode = 'day' | 'work_week' | 'month';
+type CalendarViewMode = 'day' | 'work_week' | 'week' | 'month';
 
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
 const HOUR_HEIGHT = 56; // px per hour
@@ -35,6 +35,96 @@ const MONTH_NAMES = [
 const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const WORK_WEEK_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
 
+interface PositionedMeeting {
+  meeting: Meeting;
+  top: number;
+  height: number;
+  col: number;
+  totalCols: number;
+}
+
+// Side-by-side layout algorithm for overlapping meetings
+const layoutDayMeetings = (dayMeetings: Meeting[]): PositionedMeeting[] => {
+  if (dayMeetings.length === 0) return [];
+
+  const parsed = dayMeetings.map((m) => {
+    const start = new Date(m.scheduled_start!);
+    const end = m.scheduled_end
+      ? new Date(m.scheduled_end)
+      : new Date(start.getTime() + 60 * 60 * 1000);
+    const startMin = start.getHours() * 60 + start.getMinutes();
+    let durationMin = (end.getTime() - start.getTime()) / (60 * 1000);
+    if (durationMin < 25) durationMin = 25;
+    const endMin = startMin + durationMin;
+    return {
+      meeting: m,
+      startMin,
+      endMin,
+      top: (startMin / 60) * HOUR_HEIGHT,
+      height: (durationMin / 60) * HOUR_HEIGHT - 2,
+    };
+  });
+
+  parsed.sort((a, b) => a.startMin - b.startMin || (b.endMin - b.startMin) - (a.endMin - a.startMin));
+
+  const clusters: typeof parsed[] = [];
+  let currentCluster: typeof parsed = [];
+  let clusterEnd = -1;
+
+  for (const item of parsed) {
+    if (currentCluster.length === 0) {
+      currentCluster.push(item);
+      clusterEnd = item.endMin;
+    } else if (item.startMin < clusterEnd) {
+      currentCluster.push(item);
+      clusterEnd = Math.max(clusterEnd, item.endMin);
+    } else {
+      clusters.push(currentCluster);
+      currentCluster = [item];
+      clusterEnd = item.endMin;
+    }
+  }
+  if (currentCluster.length > 0) {
+    clusters.push(currentCluster);
+  }
+
+  const results: PositionedMeeting[] = [];
+
+  for (const cluster of clusters) {
+    const colEnds: number[] = [];
+    const clusterPositions: { item: typeof parsed[0]; col: number }[] = [];
+
+    for (const item of cluster) {
+      let placedCol = -1;
+      for (let c = 0; c < colEnds.length; c++) {
+        if (colEnds[c] <= item.startMin) {
+          colEnds[c] = item.endMin;
+          placedCol = c;
+          break;
+        }
+      }
+      if (placedCol === -1) {
+        colEnds.push(item.endMin);
+        placedCol = colEnds.length - 1;
+      }
+      clusterPositions.push({ item, col: placedCol });
+    }
+
+    const totalCols = Math.max(1, colEnds.length);
+    for (const cp of clusterPositions) {
+      results.push({
+        meeting: cp.item.meeting,
+        top: cp.item.top,
+        height: cp.item.height,
+        col: cp.col,
+        totalCols,
+      });
+    }
+  }
+
+  return results;
+};
+
 export const MeetingsPage: React.FC = () => {
   const { user, activeOrganization } = useAuth();
   const navigate = useNavigate();
@@ -45,6 +135,7 @@ export const MeetingsPage: React.FC = () => {
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
 
   // Modals state
   const [isNewMeetingOpen, setIsNewMeetingOpen] = useState(false);
@@ -100,7 +191,7 @@ export const MeetingsPage: React.FC = () => {
 
   // Initial scroll to 08:00 AM in timeline views
   useEffect(() => {
-    if (timeGridScrollRef.current && (viewMode === 'day' || viewMode === 'work_week')) {
+    if (timeGridScrollRef.current && (viewMode === 'day' || viewMode === 'work_week' || viewMode === 'week')) {
       // Scroll to 8 AM (8 * HOUR_HEIGHT)
       timeGridScrollRef.current.scrollTop = 8 * HOUR_HEIGHT - 20;
     }
@@ -129,7 +220,7 @@ export const MeetingsPage: React.FC = () => {
     const next = new Date(currentDate);
     if (viewMode === 'day') {
       next.setDate(next.getDate() - 1);
-    } else if (viewMode === 'work_week') {
+    } else if (viewMode === 'work_week' || viewMode === 'week') {
       next.setDate(next.getDate() - 7);
     } else {
       next.setMonth(next.getMonth() - 1);
@@ -141,7 +232,7 @@ export const MeetingsPage: React.FC = () => {
     const next = new Date(currentDate);
     if (viewMode === 'day') {
       next.setDate(next.getDate() + 1);
-    } else if (viewMode === 'work_week') {
+    } else if (viewMode === 'work_week' || viewMode === 'week') {
       next.setDate(next.getDate() + 7);
     } else {
       next.setMonth(next.getMonth() + 1);
@@ -363,9 +454,15 @@ export const MeetingsPage: React.FC = () => {
     return `${sStr} - ${eStr}`;
   };
 
-  // Calculate day columns for Work Week (Mon - Fri)
+  // Calculate day columns for Work Week (Mon - Fri) and Full Week (Mon - Sun)
   const startOfWeek = getStartOfWeek(currentDate);
   const workWeekDays = Array.from({ length: 5 }, (_, i) => {
+    const d = new Date(startOfWeek);
+    d.setDate(d.getDate() + i);
+    return d;
+  });
+
+  const weekDays = Array.from({ length: 7 }, (_, i) => {
     const d = new Date(startOfWeek);
     d.setDate(d.getDate() + i);
     return d;
@@ -424,6 +521,14 @@ export const MeetingsPage: React.FC = () => {
     }
     if (viewMode === 'day') {
       return `${currentDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}`;
+    }
+    if (viewMode === 'week') {
+      const first = weekDays[0];
+      const last = weekDays[6];
+      if (first.getMonth() === last.getMonth()) {
+        return `${MONTH_NAMES[first.getMonth()]} ${first.getDate()} - ${last.getDate()}, ${first.getFullYear()}`;
+      }
+      return `${MONTH_NAMES[first.getMonth()].slice(0, 3)} ${first.getDate()} - ${MONTH_NAMES[last.getMonth()].slice(0, 3)} ${last.getDate()}, ${last.getFullYear()}`;
     }
     // Work week
     const first = workWeekDays[0];
@@ -558,7 +663,7 @@ export const MeetingsPage: React.FC = () => {
 
           <div style={{ height: '20px', width: '1px', backgroundColor: 'var(--border-color)' }} />
 
-          {/* View Selector (Day / Work week / Month) */}
+          {/* View Selector (Day / Work week / Week / Month) */}
           <div style={{
             display: 'flex',
             backgroundColor: 'var(--bg-tertiary)',
@@ -595,6 +700,21 @@ export const MeetingsPage: React.FC = () => {
               }}
             >
               Work week
+            </button>
+            <button
+              onClick={() => setViewMode('week')}
+              style={{
+                background: viewMode === 'week' ? 'var(--brand-primary)' : 'transparent',
+                color: viewMode === 'week' ? '#ffffff' : 'var(--text-secondary)',
+                border: 'none',
+                padding: '4px 10px',
+                fontSize: '12px',
+                fontWeight: viewMode === 'week' ? 600 : 400,
+                borderRadius: '3px',
+                cursor: 'pointer',
+              }}
+            >
+              Week
             </button>
             <button
               onClick={() => setViewMode('month')}
@@ -640,8 +760,8 @@ export const MeetingsPage: React.FC = () => {
       {/* Main Calendar View Area */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', position: 'relative' }}>
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
-          {/* VIEW 1 & 2: DAY & WORK WEEK (24-Hour Timeline Ruler) */}
-        {(viewMode === 'day' || viewMode === 'work_week') && (
+          {/* VIEW 1, 2 & 3: DAY, WORK WEEK & FULL WEEK (24-Hour Timeline Ruler) */}
+        {(viewMode === 'day' || viewMode === 'work_week' || viewMode === 'week') && (
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             {/* Column Headers (Days) */}
             <div style={{
@@ -663,7 +783,7 @@ export const MeetingsPage: React.FC = () => {
               </div>
 
               {/* Day headers */}
-              {(viewMode === 'day' ? [currentDate] : workWeekDays).map((day, idx) => {
+              {(viewMode === 'day' ? [currentDate] : viewMode === 'week' ? weekDays : workWeekDays).map((day, idx, arr) => {
                 const isToday = isSameDay(day, now);
                 const isSelected = isSameDay(day, currentDate);
                 return (
@@ -673,7 +793,7 @@ export const MeetingsPage: React.FC = () => {
                     style={{
                       flex: 1,
                       padding: '10px 16px',
-                      borderRight: idx < (viewMode === 'day' ? 0 : 4) ? '1px solid var(--border-color)' : 'none',
+                      borderRight: idx < arr.length - 1 ? '1px solid var(--border-color)' : 'none',
                       backgroundColor: isSelected ? 'rgba(91, 95, 199, 0.08)' : 'transparent',
                       cursor: 'pointer',
                       display: 'flex',
@@ -741,13 +861,14 @@ export const MeetingsPage: React.FC = () => {
 
               {/* Day Columns Container */}
               <div style={{ flex: 1, display: 'flex', position: 'relative' }}>
-                {(viewMode === 'day' ? [currentDate] : workWeekDays).map((day, colIdx) => {
+                {(viewMode === 'day' ? [currentDate] : viewMode === 'week' ? weekDays : workWeekDays).map((day, colIdx, arr) => {
                   const isToday = isSameDay(day, now);
                   const daysMeetings = meetings.filter((m) => {
                     if (!m.scheduled_start) return false;
                     const mDate = new Date(m.scheduled_start);
                     return isSameDay(mDate, day);
                   });
+                  const positionedMeetings = layoutDayMeetings(daysMeetings);
 
                   return (
                     <div
@@ -755,8 +876,8 @@ export const MeetingsPage: React.FC = () => {
                       style={{
                         flex: 1,
                         position: 'relative',
-                        borderRight: colIdx < (viewMode === 'day' ? 0 : 4) ? '1px solid var(--border-color)' : 'none',
-                        minWidth: '140px',
+                        borderRight: colIdx < arr.length - 1 ? '1px solid var(--border-color)' : 'none',
+                        minWidth: '120px',
                       }}
                     >
                       {/* 24 Hour slot grid backgrounds (click to add meeting) */}
@@ -806,17 +927,10 @@ export const MeetingsPage: React.FC = () => {
                         </div>
                       )}
 
-                      {/* Render Scheduled Meeting Cards */}
-                      {daysMeetings.map((m) => {
-                        const start = new Date(m.scheduled_start!);
-                        const end = m.scheduled_end ? new Date(m.scheduled_end) : new Date(start.getTime() + 60 * 60 * 1000);
-
-                        const startMin = start.getHours() * 60 + start.getMinutes();
-                        let durationMin = (end.getTime() - start.getTime()) / (60 * 1000);
-                        if (durationMin < 25) durationMin = 25; // minimum readable height
-
-                        const top = (startMin / 60) * HOUR_HEIGHT;
-                        const height = (durationMin / 60) * HOUR_HEIGHT - 2;
+                      {/* Render Scheduled Meeting Cards with Side-by-Side positioning */}
+                      {positionedMeetings.map(({ meeting: m, top, height, col, totalCols }) => {
+                        const widthPct = 100 / totalCols;
+                        const leftPct = col * widthPct;
 
                         return (
                           <div
@@ -829,8 +943,8 @@ export const MeetingsPage: React.FC = () => {
                               position: 'absolute',
                               top: `${top}px`,
                               height: `${height}px`,
-                              left: '4px',
-                              right: '4px',
+                              left: `calc(${leftPct}% + 2px)`,
+                              width: `calc(${widthPct}% - 4px)`,
                               backgroundColor: 'rgba(91, 95, 199, 0.22)',
                               borderLeft: '4px solid var(--brand-primary)',
                               borderRadius: '4px',
@@ -1016,110 +1130,170 @@ export const MeetingsPage: React.FC = () => {
         )}
         </div>
 
-        {/* Right Sidebar: Same-Day Scheduled Meetings */}
+        {/* Right Sidebar: Same-Day Scheduled Meetings (Collapsible) */}
         <div style={{
-          width: '320px',
-          minWidth: '320px',
+          width: isSidebarCollapsed ? '44px' : '320px',
+          minWidth: isSidebarCollapsed ? '44px' : '320px',
+          maxWidth: isSidebarCollapsed ? '44px' : '320px',
           borderLeft: '1px solid var(--border-color)',
           backgroundColor: 'var(--bg-secondary)',
           display: 'flex',
           flexDirection: 'column',
           overflow: 'hidden',
+          transition: 'width 0.2s ease, min-width 0.2s ease, max-width 0.2s ease',
         }}>
-          <div style={{
-            padding: '16px',
-            borderBottom: '1px solid var(--border-color)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-          }}>
-            <div>
-              <h3 style={{ fontSize: '15px', fontWeight: 700, margin: 0 }}>
-                {currentDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
-              </h3>
-              <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                {selectedDateMeetings.length} {selectedDateMeetings.length === 1 ? 'meeting' : 'meetings'} scheduled
-              </span>
-            </div>
-            <button
-              onClick={() => openNewMeetingModal(currentDate)}
-              className="teams-btn teams-btn-primary"
-              style={{ padding: '4px 10px', fontSize: '12px' }}
-              title="Schedule meeting on this day"
-            >
-              <Plus size={14} />
-              <span>Add</span>
-            </button>
-          </div>
-
-          <div style={{ flex: 1, overflowY: 'auto', padding: '14px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            {selectedDateMeetings.length === 0 ? (
-              <div style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: '36px 12px', fontSize: '13px' }}>
-                <CalendarIcon size={36} style={{ opacity: 0.35, margin: '0 auto 8px', display: 'block' }} />
-                <p style={{ margin: 0, fontWeight: 600 }}>No meetings scheduled</p>
-                <p style={{ margin: '4px 0 0', fontSize: '12px' }}>Click "Add" to schedule a meeting for this date.</p>
+          {isSidebarCollapsed ? (
+            <div style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              padding: '12px 0',
+              height: '100%',
+            }}>
+              <button
+                onClick={() => setIsSidebarCollapsed(false)}
+                className="teams-btn teams-btn-secondary"
+                style={{
+                  width: '32px',
+                  height: '32px',
+                  padding: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  marginBottom: '16px',
+                }}
+                title="Expand sidebar"
+                aria-label="Expand sidebar"
+              >
+                <ChevronLeft size={18} />
+              </button>
+              <div
+                style={{
+                  writingMode: 'vertical-rl',
+                  textOrientation: 'mixed',
+                  transform: 'rotate(180deg)',
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  color: 'var(--text-secondary)',
+                  letterSpacing: '1px',
+                  cursor: 'pointer',
+                  padding: '8px 0',
+                }}
+                onClick={() => setIsSidebarCollapsed(false)}
+              >
+                Agenda ({selectedDateMeetings.length})
               </div>
-            ) : (
-              selectedDateMeetings.map((m) => {
-                const startTime = m.scheduled_start ? new Date(m.scheduled_start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-                const endTime = m.scheduled_end ? new Date(m.scheduled_end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-                const isLive = !m.is_ended && m.is_instant;
-
-                return (
-                  <div
-                    key={m.id}
-                    onClick={() => setSelectedMeeting(m)}
-                    style={{
-                      padding: '12px',
-                      borderRadius: '8px',
-                      border: '1px solid var(--border-color)',
-                      backgroundColor: 'var(--bg-tertiary)',
-                      cursor: 'pointer',
-                      transition: 'border-color 0.15s',
-                    }}
+            </div>
+          ) : (
+            <>
+              <div style={{
+                padding: '16px',
+                borderBottom: '1px solid var(--border-color)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '8px',
+              }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <h3 style={{ fontSize: '15px', fontWeight: 700, margin: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {currentDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                  </h3>
+                  <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                    {selectedDateMeetings.length} {selectedDateMeetings.length === 1 ? 'meeting' : 'meetings'} scheduled
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <button
+                    onClick={() => openNewMeetingModal(currentDate)}
+                    className="teams-btn teams-btn-primary"
+                    style={{ padding: '4px 10px', fontSize: '12px' }}
+                    title="Schedule meeting on this day"
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
-                      <span style={{ fontWeight: 600, fontSize: '14px', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {m.title}
-                      </span>
-                      <span style={{
-                        fontSize: '11px',
-                        padding: '2px 6px',
-                        borderRadius: '4px',
-                        backgroundColor: m.is_ended ? 'rgba(138, 138, 138, 0.2)' : isLive ? 'rgba(35, 123, 75, 0.2)' : 'rgba(91, 95, 199, 0.2)',
-                        color: m.is_ended ? '#8a8a8a' : isLive ? '#237b4b' : 'var(--brand-light)',
-                        fontWeight: 600,
-                      }}>
-                        {m.is_ended ? 'Ended' : isLive ? 'Live' : 'Scheduled'}
-                      </span>
-                    </div>
+                    <Plus size={14} />
+                    <span>Add</span>
+                  </button>
+                  <button
+                    onClick={() => setIsSidebarCollapsed(true)}
+                    className="teams-btn teams-btn-secondary"
+                    style={{ width: '28px', height: '28px', padding: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                    title="Collapse sidebar"
+                    aria-label="Collapse sidebar"
+                  >
+                    <ChevronRight size={16} />
+                  </button>
+                </div>
+              </div>
 
-                    <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
-                      🕒 {startTime} {endTime ? `- ${endTime}` : ''}
-                    </div>
-
-                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px' }}>
-                      Room ID: <code style={{ backgroundColor: 'rgba(0,0,0,0.2)', padding: '1px 4px', borderRadius: '3px' }}>{m.room_name}</code>
-                    </div>
-
-                    {!m.is_ended && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleJoinExistingMeeting(m);
-                        }}
-                        className="teams-btn teams-btn-primary"
-                        style={{ width: '100%', padding: '6px 0', fontSize: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
-                      >
-                        <Video size={14} />
-                        <span>Join Meeting</span>
-                      </button>
-                    )}
+              <div style={{ flex: 1, overflowY: 'auto', padding: '14px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                {selectedDateMeetings.length === 0 ? (
+                  <div style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: '36px 12px', fontSize: '13px' }}>
+                    <CalendarIcon size={36} style={{ opacity: 0.35, margin: '0 auto 8px', display: 'block' }} />
+                    <p style={{ margin: 0, fontWeight: 600 }}>No meetings scheduled</p>
+                    <p style={{ margin: '4px 0 0', fontSize: '12px' }}>Click "Add" to schedule a meeting for this date.</p>
                   </div>
-                );
-              })
-            )}
-          </div>
+                ) : (
+                  selectedDateMeetings.map((m) => {
+                    const startTime = m.scheduled_start ? new Date(m.scheduled_start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+                    const endTime = m.scheduled_end ? new Date(m.scheduled_end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+                    const isLive = !m.is_ended && m.is_instant;
+
+                    return (
+                      <div
+                        key={m.id}
+                        onClick={() => setSelectedMeeting(m)}
+                        style={{
+                          padding: '12px',
+                          borderRadius: '8px',
+                          border: '1px solid var(--border-color)',
+                          backgroundColor: 'var(--bg-tertiary)',
+                          cursor: 'pointer',
+                          transition: 'border-color 0.15s',
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+                          <span style={{ fontWeight: 600, fontSize: '14px', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {m.title}
+                          </span>
+                          <span style={{
+                            fontSize: '11px',
+                            padding: '2px 6px',
+                            borderRadius: '4px',
+                            backgroundColor: m.is_ended ? 'rgba(138, 138, 138, 0.2)' : isLive ? 'rgba(35, 123, 75, 0.2)' : 'rgba(91, 95, 199, 0.2)',
+                            color: m.is_ended ? '#8a8a8a' : isLive ? '#237b4b' : 'var(--brand-light)',
+                            fontWeight: 600,
+                          }}>
+                            {m.is_ended ? 'Ended' : isLive ? 'Live' : 'Scheduled'}
+                          </span>
+                        </div>
+
+                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                          🕒 {startTime} {endTime ? `- ${endTime}` : ''}
+                        </div>
+
+                        <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px' }}>
+                          Room ID: <code style={{ backgroundColor: 'rgba(0,0,0,0.2)', padding: '1px 4px', borderRadius: '3px' }}>{m.room_name}</code>
+                        </div>
+
+                        {!m.is_ended && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleJoinExistingMeeting(m);
+                            }}
+                            className="teams-btn teams-btn-primary"
+                            style={{ width: '100%', padding: '6px 0', fontSize: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                          >
+                            <Video size={14} />
+                            <span>Join Meeting</span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </>
+          )}
         </div>
       </div>
 

@@ -11,7 +11,9 @@ import {
   Bell,
   Building,
   LogOut,
-  Check
+  Check,
+  AlertTriangle,
+  X
 } from 'lucide-react';
 
 export const SettingsPage: React.FC = () => {
@@ -30,6 +32,13 @@ export const SettingsPage: React.FC = () => {
   const [savingProfile, setSavingProfile] = useState(false);
   const [profileSuccess, setProfileSuccess] = useState('');
   const [profileError, setProfileError] = useState('');
+
+  // Account Deactivation / Sign Off State
+  const [isDeactivateModalOpen, setIsDeactivateModalOpen] = useState(false);
+  const [deactivatePassword, setDeactivatePassword] = useState('');
+  const [deactivateLoading, setDeactivateLoading] = useState(false);
+  const [deactivateError, setDeactivateError] = useState<string | null>(null);
+  const [deactivateSuccessMessage, setDeactivateSuccessMessage] = useState<string | null>(null);
 
   useEffect(() => {
     // Fetch personal profile details
@@ -64,6 +73,29 @@ export const SettingsPage: React.FC = () => {
       setProfileError(err.message || 'Failed to update profile.');
     } finally {
       setSavingProfile(false);
+    }
+  };
+
+  const handleDeactivateAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!deactivatePassword) {
+      setDeactivateError('Current password is required.');
+      return;
+    }
+    setDeactivateLoading(true);
+    setDeactivateError(null);
+    try {
+      const resp = await api.post<any>('/api/v1/auth/deactivate/', {
+        password: deactivatePassword,
+      });
+      const farewellMsg = resp.detail || "Thank you for being part of Let's Connect. We wish you a great career ahead.";
+      setDeactivateSuccessMessage(farewellMsg);
+      setTimeout(() => {
+        logout();
+      }, 3500);
+    } catch (err: any) {
+      setDeactivateError(err.message || 'Incorrect password or deactivation failed.');
+      setDeactivateLoading(false);
     }
   };
 
@@ -398,17 +430,172 @@ export const SettingsPage: React.FC = () => {
           borderRadius: '8px',
           border: '1px solid var(--border-color)',
           padding: '20px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
         }}>
+          <div>
+            <div style={{ fontSize: '14px', fontWeight: 600 }}>Sign Out</div>
+            <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Sign out of your current session on this device</div>
+          </div>
           <button
             onClick={logout}
-            className="teams-btn teams-btn-danger"
-            style={{ padding: '8px 16px' }}
+            className="teams-btn teams-btn-secondary"
+            style={{ padding: '8px 16px', display: 'flex', alignItems: 'center', gap: '8px' }}
           >
             <LogOut size={16} />
-            <span>Sign Out of LetsConnect</span>
+            <span>Sign Out</span>
+          </button>
+        </div>
+
+        {/* Danger Zone: Sign Off & Account Deactivation */}
+        <div style={{
+          backgroundColor: 'rgba(196, 49, 75, 0.05)',
+          borderRadius: '8px',
+          border: '1px solid rgba(196, 49, 75, 0.3)',
+          padding: '20px',
+        }}>
+          <h2 style={{ fontSize: '16px', fontWeight: 600, marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px', color: '#c4314b' }}>
+            <AlertTriangle size={18} />
+            <span>Sign Off & Deactivate Account</span>
+          </h2>
+          <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px', lineHeight: '1.5' }}>
+            Deactivating your account will sign you off from LetsConnect across all devices, revoke active authentication tokens, and mark your employee profile as inactive. Your conversation history and past contributions will be preserved.
+          </p>
+          <button
+            onClick={() => {
+              setDeactivatePassword('');
+              setDeactivateError(null);
+              setDeactivateSuccessMessage(null);
+              setIsDeactivateModalOpen(true);
+            }}
+            className="teams-btn teams-btn-danger"
+            style={{ padding: '8px 16px', fontSize: '13px' }}
+          >
+            Sign Off & Deactivate Account
           </button>
         </div>
       </div>
+
+      {/* Account Deactivation Modal */}
+      {isDeactivateModalOpen && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.6)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000,
+        }}>
+          <div style={{
+            width: '460px',
+            backgroundColor: 'var(--bg-secondary)',
+            borderRadius: '8px',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+            border: '1px solid var(--border-color)',
+            overflow: 'hidden',
+          }}>
+            <div style={{
+              padding: '16px 20px',
+              borderBottom: '1px solid var(--border-color)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              backgroundColor: 'rgba(196, 49, 75, 0.1)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#c4314b', fontWeight: 600, fontSize: '15px' }}>
+                <AlertTriangle size={18} />
+                <span>Confirm Account Deactivation</span>
+              </div>
+              {!deactivateSuccessMessage && (
+                <button
+                  onClick={() => setIsDeactivateModalOpen(false)}
+                  style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer' }}
+                >
+                  <X size={18} />
+                </button>
+              )}
+            </div>
+
+            <div style={{ padding: '20px' }}>
+              {deactivateSuccessMessage ? (
+                <div style={{
+                  padding: '16px',
+                  backgroundColor: 'rgba(35, 123, 75, 0.15)',
+                  border: '1px solid #237b4b',
+                  borderRadius: '6px',
+                  textAlign: 'center',
+                }}>
+                  <div style={{ fontSize: '15px', fontWeight: 600, color: '#237b4b', marginBottom: '8px' }}>
+                    {deactivateSuccessMessage}
+                  </div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                    Signing off and redirecting to login...
+                  </div>
+                </div>
+              ) : (
+                <form onSubmit={handleDeactivateAccount} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  <p style={{ fontSize: '13px', color: 'var(--text-primary)', margin: 0, lineHeight: '1.5' }}>
+                    To confirm the permanent sign-off and deactivation of your <strong>{user?.email}</strong> account, please enter your current password below.
+                  </p>
+
+                  {deactivateError && (
+                    <div style={{
+                      padding: '8px 12px',
+                      backgroundColor: 'rgba(196, 49, 75, 0.15)',
+                      border: '1px solid var(--danger)',
+                      borderRadius: '4px',
+                      color: '#ff6b6b',
+                      fontSize: '13px',
+                    }}>
+                      {deactivateError}
+                    </div>
+                  )}
+
+                  <div>
+                    <label style={{ display: 'block', fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                      Current Password <span style={{ color: 'var(--danger)' }}>*</span>
+                    </label>
+                    <input
+                      type="password"
+                      className="teams-input"
+                      placeholder="Enter your current password"
+                      value={deactivatePassword}
+                      onChange={(e) => setDeactivatePassword(e.target.value)}
+                      disabled={deactivateLoading}
+                      required
+                      autoFocus
+                    />
+                  </div>
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '10px' }}>
+                    <button
+                      type="button"
+                      onClick={() => setIsDeactivateModalOpen(false)}
+                      className="teams-btn teams-btn-secondary"
+                      disabled={deactivateLoading}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={deactivateLoading || !deactivatePassword.trim()}
+                      className="teams-btn teams-btn-danger"
+                      style={{ padding: '8px 16px' }}
+                    >
+                      {deactivateLoading ? 'Deactivating...' : 'Confirm Sign Off & Deactivate'}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

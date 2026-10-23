@@ -31,6 +31,7 @@ class PermissionTests(TestCase):
         )
         self.emp_owner = Employee.objects.create(
             organization=self.org,
+            employee_id="EMP_OWNER",
             first_name="Owner",
             last_name="User",
             email="owner@testorg.com",
@@ -45,6 +46,7 @@ class PermissionTests(TestCase):
         )
         self.emp_member = Employee.objects.create(
             organization=self.org,
+            employee_id="EMP_MEMBER",
             first_name="Member",
             last_name="User",
             email="member@testorg.com",

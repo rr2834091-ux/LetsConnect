@@ -1,5 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../state/AuthContext';
+import { api } from '../services/api';
+import { MemberProfileModal } from './common/MemberProfileModal';
 import {
   Search,
   ChevronDown,
@@ -9,7 +12,14 @@ import {
   Moon,
   Sun,
   Check,
-  Video
+  Video,
+  MessageSquare,
+  Hash,
+  Calendar,
+  Sparkles,
+  Edit3,
+  X,
+  Loader2
 } from 'lucide-react';
 import { useTheme } from '../state/ThemeContext';
 
@@ -27,15 +37,41 @@ export const TopBar: React.FC = () => {
     logout,
   } = useAuth();
 
+  const navigate = useNavigate();
   const { theme, toggleTheme } = useTheme();
 
   const [isOrgDropdownOpen, setIsOrgDropdownOpen] = useState(false);
   const [isPresenceOpen, setIsPresenceOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
 
+  // Search State
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [searchResults, setSearchResults] = useState<{
+    people: any[];
+    messages: any[];
+    channels: any[];
+    meetings: any[];
+  }>({
+    people: [],
+    messages: [],
+    channels: [],
+    meetings: [],
+  });
+
+  // Profile Modal State
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [selectedMemberId, setSelectedMemberId] = useState<string | number | null>(null);
+
+  // Custom Status Modal / Popover State
+  const [isCustomStatusOpen, setIsCustomStatusOpen] = useState(false);
+  const [customStatusInput, setCustomStatusInput] = useState('');
+
   const orgRef = useRef<HTMLDivElement>(null);
   const presenceRef = useRef<HTMLDivElement>(null);
   const profileRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLDivElement>(null);
 
   // Close dropdowns when clicking outside
   useEffect(() => {
@@ -49,17 +85,52 @@ export const TopBar: React.FC = () => {
       if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
         setIsProfileOpen(false);
       }
+      if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
+        setIsSearchOpen(false);
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Sync custom status input when auth context changes
+  useEffect(() => {
+    setCustomStatusInput(customStatus || '');
+  }, [customStatus]);
+
+  // Debounced search query
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setSearchResults({ people: [], messages: [], channels: [], meetings: [] });
+      setIsSearching(false);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      setIsSearching(true);
+      try {
+        const orgId = activeOrganization?.id || '';
+        const res = await api.get<{ results: any }>(
+          `/api/v1/search/?q=${encodeURIComponent(searchQuery.trim())}&organization_id=${orgId}`
+        );
+        setSearchResults(res.results || { people: [], messages: [], channels: [], meetings: [] });
+        setIsSearchOpen(true);
+      } catch (err) {
+        console.error('Search error:', err);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 280);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery, activeOrganization?.id]);
+
+  // Requirement: Remove "Be right back" from presence statuses
   const presenceOptions = [
     { key: 'available', label: 'Available', color: '#237b4b' },
     { key: 'busy', label: 'Busy', color: '#c4314b' },
     { key: 'dnd', label: 'Do not disturb', color: '#c4314b' },
     { key: 'away', label: 'Away', color: '#f2994a' },
-    { key: 'be_right_back', label: 'Be right back', color: '#f2994a' },
     { key: 'offline', label: 'Appear offline', color: '#8a8a8a' },
   ];
 
@@ -71,6 +142,23 @@ export const TopBar: React.FC = () => {
     if (parts.length >= 2) return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
     return parts[0].slice(0, 2).toUpperCase();
   };
+
+  const handleSaveCustomStatus = async () => {
+    await updatePresence(presenceStatus, customStatusInput.trim());
+    setIsCustomStatusOpen(false);
+  };
+
+  const handleClearCustomStatus = async () => {
+    setCustomStatusInput('');
+    await updatePresence(presenceStatus, '');
+    setIsCustomStatusOpen(false);
+  };
+
+  const totalResultsCount =
+    searchResults.people.length +
+    searchResults.messages.length +
+    searchResults.channels.length +
+    searchResults.meetings.length;
 
   return (
     <header style={{
@@ -186,32 +274,391 @@ export const TopBar: React.FC = () => {
       </div>
 
       {/* Global Search Bar */}
-      <div style={{ flex: '0 1 480px', position: 'relative' }}>
-        <Search
-          size={16}
-          style={{
-            position: 'absolute',
-            left: '10px',
-            top: '50%',
-            transform: 'translateY(-50%)',
-            color: 'var(--text-muted)',
-          }}
-        />
-        <input
-          type="text"
-          placeholder="Search messages, channels, files, and meetings (Ctrl+E)"
-          className="teams-input"
-          style={{
-            paddingLeft: '34px',
-            height: '32px',
-            backgroundColor: 'var(--bg-primary)',
-            borderRadius: '4px',
-          }}
-        />
+      <div ref={searchRef} style={{ flex: '0 1 500px', position: 'relative' }}>
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+          <Search
+            size={16}
+            style={{
+              position: 'absolute',
+              left: '10px',
+              top: '50%',
+              transform: 'translateY(-50%)',
+              color: 'var(--text-muted)',
+              pointerEvents: 'none',
+            }}
+          />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => {
+              setSearchQuery(e.target.value);
+              setIsSearchOpen(true);
+            }}
+            onFocus={() => {
+              if (searchQuery.trim()) setIsSearchOpen(true);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setIsSearchOpen(false);
+            }}
+            placeholder="Search people, messages, channels, and meetings..."
+            className="teams-input"
+            style={{
+              width: '100%',
+              paddingLeft: '34px',
+              paddingRight: searchQuery ? '30px' : '10px',
+              height: '32px',
+              backgroundColor: 'var(--bg-primary)',
+              borderRadius: '4px',
+              fontSize: '13px',
+            }}
+          />
+          {searchQuery && (
+            <button
+              onClick={() => {
+                setSearchQuery('');
+                setIsSearchOpen(false);
+              }}
+              style={{
+                position: 'absolute',
+                right: '8px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--text-muted)',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                padding: '2px',
+              }}
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
+
+        {/* Global Search Dropdown */}
+        {isSearchOpen && searchQuery.trim().length > 0 && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 'calc(100% + 6px)',
+              left: 0,
+              right: 0,
+              backgroundColor: 'var(--bg-secondary)',
+              border: '1px solid var(--border-color)',
+              borderRadius: '6px',
+              boxShadow: '0 10px 28px rgba(0,0,0,0.35)',
+              maxHeight: '440px',
+              overflowY: 'auto',
+              zIndex: 150,
+              padding: '6px 0',
+            }}
+          >
+            {isSearching ? (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  padding: '20px',
+                  color: 'var(--text-secondary)',
+                  fontSize: '13px',
+                }}
+              >
+                <Loader2 size={16} className="animate-spin" />
+                <span>Searching across workspace...</span>
+              </div>
+            ) : totalResultsCount === 0 ? (
+              <div
+                style={{
+                  padding: '24px 16px',
+                  textAlign: 'center',
+                  color: 'var(--text-muted)',
+                  fontSize: '13px',
+                }}
+              >
+                No matches found for <strong style={{ color: 'var(--text-primary)' }}>"{searchQuery}"</strong>
+              </div>
+            ) : (
+              <div>
+                {/* People Results */}
+                {searchResults.people.length > 0 && (
+                  <div>
+                    <div
+                      style={{
+                        padding: '6px 12px',
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        color: 'var(--text-muted)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.5px',
+                        borderBottom: '1px solid var(--border-color)',
+                        backgroundColor: 'var(--bg-primary)',
+                      }}
+                    >
+                      People ({searchResults.people.length})
+                    </div>
+                    {searchResults.people.map((person) => (
+                      <div
+                        key={person.id}
+                        onClick={() => {
+                          setSelectedMemberId(person.user_id || person.id);
+                          setProfileModalOpen(true);
+                          setIsSearchOpen(false);
+                        }}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          padding: '8px 12px',
+                          cursor: 'pointer',
+                          transition: 'background-color 0.15s',
+                        }}
+                        onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--bg-hover)')}
+                        onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+                      >
+                        <div
+                          style={{
+                            width: '30px',
+                            height: '30px',
+                            borderRadius: '50%',
+                            backgroundColor: 'var(--brand-primary)',
+                            color: '#fff',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            flexShrink: 0,
+                          }}
+                        >
+                          {getInitials(person.full_name)}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                            {person.full_name}
+                          </div>
+                          <div
+                            style={{
+                              fontSize: '11px',
+                              color: 'var(--text-secondary)',
+                              whiteSpace: 'nowrap',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                            }}
+                          >
+                            {person.job_title} • {person.department || person.email}
+                          </div>
+                        </div>
+                        <span
+                          style={{
+                            fontSize: '10px',
+                            padding: '2px 6px',
+                            borderRadius: '4px',
+                            backgroundColor: 'var(--bg-hover)',
+                            color: 'var(--text-secondary)',
+                          }}
+                        >
+                          View Profile
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Messages Results */}
+                {searchResults.messages.length > 0 && (
+                  <div>
+                    <div
+                      style={{
+                        padding: '6px 12px',
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        color: 'var(--text-muted)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.5px',
+                        borderBottom: '1px solid var(--border-color)',
+                        backgroundColor: 'var(--bg-primary)',
+                      }}
+                    >
+                      Messages ({searchResults.messages.length})
+                    </div>
+                    {searchResults.messages.map((msg) => (
+                      <div
+                        key={msg.id}
+                        onClick={() => {
+                          navigate(`/chat?conversation=${msg.conversation_id}&message=${msg.id}`);
+                          setIsSearchOpen(false);
+                        }}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          padding: '8px 12px',
+                          cursor: 'pointer',
+                        }}
+                        onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--bg-hover)')}
+                        onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+                      >
+                        <MessageSquare size={16} color="var(--brand-light)" style={{ flexShrink: 0 }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: '13px', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {msg.content}
+                          </div>
+                          <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                            From {msg.sender_name}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Channels Results */}
+                {searchResults.channels.length > 0 && (
+                  <div>
+                    <div
+                      style={{
+                        padding: '6px 12px',
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        color: 'var(--text-muted)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.5px',
+                        borderBottom: '1px solid var(--border-color)',
+                        backgroundColor: 'var(--bg-primary)',
+                      }}
+                    >
+                      Channels ({searchResults.channels.length})
+                    </div>
+                    {searchResults.channels.map((chan) => (
+                      <div
+                        key={chan.id}
+                        onClick={() => {
+                          navigate(`/teams?team=${chan.team_id}&channel=${chan.id}`);
+                          setIsSearchOpen(false);
+                        }}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          padding: '8px 12px',
+                          cursor: 'pointer',
+                        }}
+                        onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--bg-hover)')}
+                        onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+                      >
+                        <Hash size={16} color="var(--brand-light)" style={{ flexShrink: 0 }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                            #{chan.name}
+                          </div>
+                          <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                            Team: {chan.team_name}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Meetings Results */}
+                {searchResults.meetings.length > 0 && (
+                  <div>
+                    <div
+                      style={{
+                        padding: '6px 12px',
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        color: 'var(--text-muted)',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.5px',
+                        borderBottom: '1px solid var(--border-color)',
+                        backgroundColor: 'var(--bg-primary)',
+                      }}
+                    >
+                      Meetings ({searchResults.meetings.length})
+                    </div>
+                    {searchResults.meetings.map((meeting) => (
+                      <div
+                        key={meeting.id}
+                        onClick={() => {
+                          navigate(`/meetings?meeting=${meeting.id}`);
+                          setIsSearchOpen(false);
+                        }}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          padding: '8px 12px',
+                          cursor: 'pointer',
+                        }}
+                        onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = 'var(--bg-hover)')}
+                        onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+                      >
+                        <Calendar size={16} color="var(--brand-light)" style={{ flexShrink: 0 }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                            {meeting.title}
+                          </div>
+                          <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                            {meeting.start_time ? new Date(meeting.start_time).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : 'Scheduled'}
+                          </div>
+                        </div>
+                        {meeting.is_live && (
+                          <span
+                            style={{
+                              fontSize: '10px',
+                              backgroundColor: 'var(--danger)',
+                              color: '#fff',
+                              padding: '2px 6px',
+                              borderRadius: '4px',
+                              fontWeight: 600,
+                            }}
+                          >
+                            LIVE
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* Right Controls: Theme Toggle, Presence & Profile Menu */}
+      {/* Right Controls: Theme Toggle, Custom Status, Presence & Profile Menu */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+        {/* Active Custom Status Pill */}
+        {customStatus && (
+          <div
+            onClick={() => setIsCustomStatusOpen(true)}
+            title="Click to edit custom status"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '5px',
+              backgroundColor: 'var(--bg-hover)',
+              padding: '3px 8px',
+              borderRadius: '12px',
+              fontSize: '11px',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer',
+              maxWidth: '160px',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            <Sparkles size={12} color="var(--brand-light)" />
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{customStatus}</span>
+          </div>
+        )}
+
         <button
           onClick={toggleTheme}
           style={{
@@ -229,7 +676,7 @@ export const TopBar: React.FC = () => {
           {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
         </button>
 
-        {/* Presence Selector */}
+        {/* Presence Selector & Custom Status Trigger */}
         <div ref={presenceRef} style={{ position: 'relative' }}>
           <button
             onClick={() => setIsPresenceOpen(!isPresenceOpen)}
@@ -266,7 +713,7 @@ export const TopBar: React.FC = () => {
               border: '1px solid var(--border-color)',
               borderRadius: '6px',
               boxShadow: '0 8px 16px rgba(0,0,0,0.3)',
-              width: '180px',
+              width: '190px',
               padding: '4px 0',
               zIndex: 100,
             }}>
@@ -274,7 +721,7 @@ export const TopBar: React.FC = () => {
                 <div
                   key={opt.key}
                   onClick={() => {
-                    updatePresence(opt.key);
+                    updatePresence(opt.key, customStatus);
                     setIsPresenceOpen(false);
                   }}
                   style={{
@@ -291,6 +738,27 @@ export const TopBar: React.FC = () => {
                   <span>{opt.label}</span>
                 </div>
               ))}
+
+              {/* Custom Status Option */}
+              <div style={{ borderTop: '1px solid var(--border-color)', margin: '4px 0' }} />
+              <div
+                onClick={() => {
+                  setIsPresenceOpen(false);
+                  setIsCustomStatusOpen(true);
+                }}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '8px 12px',
+                  fontSize: '13px',
+                  cursor: 'pointer',
+                  color: 'var(--brand-light)',
+                }}
+              >
+                <Sparkles size={14} />
+                <span>{customStatus ? 'Edit status message' : 'Set status message'}</span>
+              </div>
             </div>
           )}
         </div>
@@ -352,7 +820,30 @@ export const TopBar: React.FC = () => {
                   <div style={{ fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
                     {user?.email}
                   </div>
+                  {customStatus && (
+                    <div style={{ fontSize: '11px', color: 'var(--brand-light)', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <Sparkles size={11} />
+                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {customStatus}
+                      </span>
+                    </div>
+                  )}
                 </div>
+              </div>
+
+              {/* Status Message Edit Button */}
+              <div style={{ marginBottom: '12px' }}>
+                <button
+                  onClick={() => {
+                    setIsProfileOpen(false);
+                    setIsCustomStatusOpen(true);
+                  }}
+                  className="teams-btn teams-btn-secondary"
+                  style={{ width: '100%', fontSize: '12px', padding: '6px 10px', justifyContent: 'center' }}
+                >
+                  <Edit3 size={13} />
+                  <span>{customStatus ? 'Edit status message' : 'Set status message'}</span>
+                </button>
               </div>
 
               {/* Account Context Switcher */}
@@ -441,6 +932,104 @@ export const TopBar: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Custom Status Modal */}
+      {isCustomStatusOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+          }}
+        >
+          <div
+            style={{
+              backgroundColor: 'var(--bg-secondary)',
+              border: '1px solid var(--border-color)',
+              borderRadius: '8px',
+              width: '420px',
+              maxWidth: '90vw',
+              padding: '20px',
+              boxShadow: '0 12px 32px rgba(0,0,0,0.4)',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Sparkles size={18} color="var(--brand-light)" />
+                <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 600 }}>Set status message</h3>
+              </div>
+              <button
+                onClick={() => setIsCustomStatusOpen(false)}
+                style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)' }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginTop: 0, marginBottom: '12px' }}>
+              What's your status? Let colleagues know what you're working on or when you're free.
+            </p>
+
+            <textarea
+              value={customStatusInput}
+              onChange={(e) => setCustomStatusInput(e.target.value)}
+              placeholder="e.g., In design review until 3 PM, Focus mode, Working remotely today"
+              maxLength={140}
+              rows={3}
+              className="teams-input"
+              style={{
+                width: '100%',
+                padding: '10px',
+                fontSize: '13px',
+                borderRadius: '4px',
+                resize: 'none',
+                backgroundColor: 'var(--bg-primary)',
+              }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px', fontSize: '11px', color: 'var(--text-muted)' }}>
+              <span>{140 - customStatusInput.length} characters remaining</span>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '16px' }}>
+              {customStatus && (
+                <button
+                  onClick={handleClearCustomStatus}
+                  className="teams-btn teams-btn-secondary"
+                  style={{ color: 'var(--danger)', marginRight: 'auto' }}
+                >
+                  Clear status
+                </button>
+              )}
+              <button
+                onClick={() => setIsCustomStatusOpen(false)}
+                className="teams-btn teams-btn-secondary"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveCustomStatus}
+                className="teams-btn teams-btn-primary"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Member Profile Modal from Search */}
+      <MemberProfileModal
+        isOpen={profileModalOpen}
+        onClose={() => {
+          setProfileModalOpen(false);
+          setSelectedMemberId(null);
+        }}
+        memberId={selectedMemberId}
+      />
     </header>
   );
 };

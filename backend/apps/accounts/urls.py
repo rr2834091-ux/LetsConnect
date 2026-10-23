@@ -2,7 +2,8 @@ from django.urls import path
 from .views import (
     LoginView, RegisterPersonalView, WorkSetupCheckView,
     SendOTPView, VerifyOTPView, SetInitialPasswordView,
-    GoogleAuthView, GoogleConfigView, ProfileView, SwitchContextView
+    GoogleAuthView, GoogleConfigView, ProfileView, SwitchContextView,
+    AccountDeactivationView
 )
 
 urlpatterns = [
@@ -16,4 +17,5 @@ urlpatterns = [
     path('google/config/', GoogleConfigView.as_view(), name='auth-google-config'),
     path('profile/', ProfileView.as_view(), name='auth-profile'),
     path('switch-context/', SwitchContextView.as_view(), name='auth-switch-context'),
+    path('deactivate/', AccountDeactivationView.as_view(), name='auth-deactivate'),
 ]

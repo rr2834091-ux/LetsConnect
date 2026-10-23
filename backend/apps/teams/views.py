@@ -119,9 +119,15 @@ class TeamDetailView(generics.RetrieveUpdateDestroyAPIView):
             Q(organization_id__in=admin_org_ids) | Q(visibility='public') | Q(id__in=my_team_ids)
         ).distinct()
 
+    def perform_update(self, serializer):
+        team = serializer.instance
+        if not is_team_owner(self.request.user, team.id) and not is_org_admin(self.request.user, team.organization_id):
+            raise exceptions.PermissionDenied("Only a team owner or organization admin can edit this team.")
+        serializer.save()
+
     def perform_destroy(self, instance):
-        if not is_team_owner(self.request.user, instance.id):
-            raise exceptions.PermissionDenied("Only a team owner or admin can archive or remove a team.")
+        if not is_team_owner(self.request.user, instance.id) and not is_org_admin(self.request.user, instance.organization_id):
+            raise exceptions.PermissionDenied("Only a team owner or organization admin can archive or remove a team.")
         instance.is_archived = True
         instance.save()
 

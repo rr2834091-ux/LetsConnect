@@ -26,22 +26,41 @@ class FileUploadView(generics.CreateAPIView):
         conversation_id = request.data.get('conversation_id')
         channel_id = request.data.get('channel_id')
 
-        # Generate unique storage path
+        # Enforce strict organisation-level permission check
+        if org_id:
+            from apps.memberships.models import Employee, AdminProfile
+            is_member = Employee.objects.filter(
+                organization_id=org_id,
+                email__iexact=request.user.email,
+                status='active'
+            ).exists() or AdminProfile.objects.filter(user=request.user, organization_id=org_id).exists()
+            if not is_member:
+                return Response(
+                    {"detail": "You are not authorized to upload files for this organization."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+        # Generate unique organisation-scoped storage path
+        file_id = uuid.uuid4().hex
         ext = file_obj.name.split('.')[-1] if '.' in file_obj.name else 'bin'
-        dest_filename = f"{uuid.uuid4().hex}.{ext}"
-        dest_path = f"org_{org_id or 'personal'}/{dest_filename}"
+        safe_name = f"{uuid.uuid4().hex[:8]}.{ext}"
+        if org_id:
+            dest_path = f"organisations/{org_id}/attachments/{file_id}/{safe_name}"
+        else:
+            dest_path = f"personal/{request.user.id}/attachments/{file_id}/{safe_name}"
 
         driver = get_storage_driver()
-        stored_path = driver.upload(file_obj, dest_path)
+        content_type = file_obj.content_type or 'application/octet-stream'
+        stored_path = driver.upload(file_obj, dest_path, content_type=content_type)
 
         attachment = FileAttachment.objects.create(
             organization_id=org_id,
             uploader=request.user,
             filename=file_obj.name,
             file_size=file_obj.size,
-            mime_type=file_obj.content_type or 'application/octet-stream',
+            mime_type=content_type,
             storage_path=stored_path,
-            storage_provider="supabase" if "supabase" in stored_path else "local",
+            storage_provider="supabase" if getattr(settings, 'SUPABASE_URL', '') else "local",
             conversation_id=conversation_id,
             channel_id=channel_id
         )
@@ -125,6 +144,13 @@ class FileDownloadView(APIView):
         # If it's stored on a remote URL (Supabase), redirect to it
         if file_record.storage_path.startswith("http"):
             return redirect(file_record.storage_path)
+
+        # Supabase Storage signed URL download
+        driver = get_storage_driver()
+        if file_record.storage_provider == "supabase" or file_record.storage_path.startswith("organisations/"):
+            signed_url = driver.get_signed_url(file_record.storage_path, expires_in=3600)
+            if signed_url and signed_url.startswith("http"):
+                return redirect(signed_url)
 
         # Local media storage
         clean_path = file_record.storage_path

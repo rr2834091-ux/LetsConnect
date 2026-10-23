@@ -49,3 +49,8 @@ class TeamCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Team
         fields = ['id', 'organization', 'name', 'description', 'visibility']
+
+    def validate_name(self, value):
+        if not value or not str(value).strip():
+            raise serializers.ValidationError("Team name is required.")
+        return str(value).strip()
